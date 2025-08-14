@@ -4,9 +4,21 @@ import functools
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
+import os
+import re
 
 # Use MMDDYYYYHHMM
-VERSION = 81220251052
+def current_version_str():
+    d = datetime.now()
+    return f"{d.month:02d}{d.day:02d}{d.year:04d}{d.hour:02d}{d.minute:02d}"
+
+def _env_version():
+    v = os.getenv("BENCHMARK_VERSION")
+    if v and re.fullmatch(r"\d{12}", v):
+        return v
+    return None
+
+VERSION = _env_version() or current_version_str()
 
 LOG_DIR = Path("benchmark/logs")
 LOG_DIR.mkdir(exist_ok=True)

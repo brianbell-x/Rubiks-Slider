@@ -6,7 +6,15 @@
 // Constants aligned with MVP and benchmark
 export const FIXED_LIMITS = { 3: 50, 4: 100, 5: 200, 6: 400 };
 // Keep aligned with benchmark/settings.py VERSION
-export const VERSION = 81220251052;
+function getVersionFromQuery(search = typeof window !== "undefined" ? window.location.search : "") {
+  try {
+    const params = new URLSearchParams(search || "");
+    const v = params.get("version");
+    if (v && /^\d{12}$/.test(v)) return v;
+  } catch (e) {}
+  return null;
+}
+export const VERSION = getVersionFromQuery() || makeVersionNow();
 
 // Palette and color mapping based on letter
 export const PALETTE = [
