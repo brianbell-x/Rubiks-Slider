@@ -339,7 +339,7 @@ def run_game_loop(
             termination_reason = "Exceeded Move Limit"
             break
 
-        print(f"    > Attempting move {individual_move_counter + 1} (for {provider}/{model})...")
+        print(f"    > Attempting call {api_call_counter + 1} ...")
 
         # Determine prompt mode
         if failed_parse_last_turn:
@@ -593,7 +593,8 @@ def run_benchmark():
                     api_calls_made=summary["api_calls_made"],
                 )
                 run_results_for_model_at_size.append(run_data)
-                print(f"    > Result (Attempt {attempt_num+1}): moves={moves}, solved={solved}, reason={reason}")
+                api_calls = summary["api_calls_made"]
+                print(f"    > Result (Attempt {attempt_num+1}): api_calls={api_calls}, moves={moves}, solved={solved}, reason={reason}")
                 if solved:
                     model_succeeded_at_least_once = True
 
