@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Rubik's Slider</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231f2833'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='18' fill='%2366fcf1' font-family='Arial'%3ERS%3C/text%3E%3C/svg%3E" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        --bg: #0b0c10;
+        --panel: #1f2833;
+        --text: #c5c6c7;
+        --accent: #66fcf1;
+        --muted: #9aa0a6;
+        --tile-gap: 4px;
+        --anim-ms: 200ms;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 16px 12px 24px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji;
+        display: flex;
+        justify-content: center;
+      }
+      .wrap {
+        width: min(96vw, 980px);
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+      .meta {
+        display: none;
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      button, .btn {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid #2f3945;
+        padding: 8px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+        user-select: none;
+      }
+      button:hover, .btn:hover { background: #243140; border-color: #3a4756; }
+      button:active, .btn:active { background: #1d2733; }
+      button[disabled] { opacity: 0.5; cursor: default; }
+
+      .counter {
+        margin-left: auto;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .board-wrap {
+        position: relative;
+        margin: 12px 0;
+        background: #0e1116;
+        border: 1px solid #2b3440;
+        border-radius: 12px;
+        padding: 10px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+      .board {
+        position: relative;
+        margin: 0 auto;
+        width: min(80vw, 560px);
+        aspect-ratio: 1 / 1;
+        border-radius: 10px;
+        background: #11151c;
+        overflow: hidden;
+        touch-action: none; /* allow custom drag */
+        user-select: none;
+      }
+      .tile {
+        position: absolute;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        color: #111;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+        text-shadow: 0 1px 0 rgba(255,255,255,0.25);
+        box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15);
+        will-change: left, top, transform;
+        transition: left var(--anim-ms) ease, top var(--anim-ms) ease;
+      }
+      .hud {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 13px;
+        padding: 0 2px;
+      }
+      .tags {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .tag {
+        background: #18202a;
+        border: 1px solid #2b3440;
+        color: var(--text);
+        padding: 2px 6px;
+        border-radius: 999px;
+        font-size: 11px;
+      }
+      .mini {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+      }
+      #mini {
+        width: 72px;
+        height: 72px;
+        image-rendering: pixelated;
+        border-radius: 6px;
+        border: 1px solid #2b3440;
+        background: #0b0f15;
+      }
+
+      .overlay {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,0.35);
+        backdrop-filter: blur(2px);
+        z-index: 5;
+      }
+      .overlay.show { display: flex; }
+      .card {
+        background: #0c141b;
+        border: 1px solid #2b3440;
+        padding: 12px 14px;
+        border-radius: 10px;
+        color: #e5f7f6;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+        max-width: 90%;
+      }
+      .card .big {
+        color: var(--accent);
+        font-weight: 800;
+        font-size: 16px;
+        letter-spacing: 0.6px;
+        text-align: center;
+      }
+      .card .hint {
+        font-size: 12px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      a.link { color: var(--accent); text-decoration: none; }
+      a.link:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

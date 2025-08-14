@@ -1,0 +1,8 @@
+Update project files for consistency and clarity
+
+- Added `logs/` and `trash/` to `.gitignore` to prevent unnecessary files from being tracked.
+- Updated README to improve clarity and consistency in terminology, specifically changing references to "Rubik's Slider" to "Rubiks Slider."
+- Removed the obsolete `benchmark.py` file to streamline the benchmark execution process.
+- Refactored function names in `runner.py` and `providers.py` for better readability and consistency.
+- Enhanced error handling and logging throughout the benchmark scripts.
+- Introduced a new HTML interface for human interaction with the Rubiks Slider game.

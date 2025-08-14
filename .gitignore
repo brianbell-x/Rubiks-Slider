@@ -1,0 +1,30 @@
+.env
+__pycache__
+.conda
+temp
+.venv
+.ruff_cache
+.clineignore
+.DS_Store
+logs/
+trash/
+
+# Benchmark artifacts
+benchmark/logs/
+
+# Node/React (ui) build artifacts and local env
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.cache/
+ui/.env
+ui/.env.*
+
+# Debug logs
+ui/npm-debug.log*
+ui/yarn-debug.log*
+ui/pnpm-debug.log*
+
+# IDE/editor
+.vscode/
+.idea/
