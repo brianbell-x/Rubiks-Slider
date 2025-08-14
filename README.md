@@ -39,10 +39,12 @@ Rubiks-Slider-Lite/
    ```
 2. **Set API Keys**: Create a `.env` file in the `benchmark/` directory for your LLM provider API keys (e.g., `OPENAI_API_KEY=...`).
 
+```
 OPENAI_API_KEY = ""
 GEMINI_API_KEY = ""
 ANTHROPIC_API_KEY = ""
 OPENROUTER_API_KEY = ""
+```
 
 3. **Configure**: Edit `benchmark/benchmark_config.json` to select the models to test.
 

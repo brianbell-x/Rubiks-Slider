@@ -6,7 +6,7 @@
       "attempts": 1
     },
     {
-      // Reasoning Models
+      // OpenAI Reasoning Models
       "provider": "openai",
       "model": "o4-mini",
       "attempts": 1,
