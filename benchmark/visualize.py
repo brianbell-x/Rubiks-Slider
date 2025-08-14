@@ -292,7 +292,7 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
         # Try to get termination_reason from summary, then from top-level 'reason'
         termination_reason = summary.get("termination_reason")
         if not termination_reason or termination_reason == "N/A":
-            termination_reason = attempt_data.get("reason")
+            termination_reason = attempt_data.get("stop_reason") or attempt_data.get("reason")
         
         if not termination_reason: # If still not found, default to "N/A"
             termination_reason = "N/A"

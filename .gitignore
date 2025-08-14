@@ -1,12 +1,10 @@
 .env
-__pycache__
 .conda
-temp
 .venv
-.ruff_cache
+__pycache__/
+.ruff_cache/
 .clineignore
 .DS_Store
-logs/
 trash/
 
 # Benchmark artifacts
@@ -30,4 +28,4 @@ ui/pnpm-debug.log*
 .idea/
 
 # Local git repair backups
-.git.backup*/
+.git.backup*

@@ -579,24 +579,27 @@ def run_benchmark():
                 summary = scenario_result["summary"]
                 moves = summary["total_individual_moves_applied"]
                 solved = summary["solved"]
-                reason = summary["termination_reason"]
+                stop_reason = summary["termination_reason"]
                 conversation = scenario_result["conversation_history"]
 
                 run_data = dict(
                     size=current_grid_size,
                     moves=moves,
                     solved=solved,
-                    reason=reason,
                     conversation=conversation,
                     run_errors=scenario_result.get("run_errors", []),
                     time_spent=summary["time_spent"],
                     api_calls_made=summary["api_calls_made"],
                 )
+                if not solved:
+                    run_data["stop_reason"] = stop_reason
                 run_results_for_model_at_size.append(run_data)
                 api_calls = summary["api_calls_made"]
-                print(f"    > Result (Attempt {attempt_num+1}): api_calls={api_calls}, moves={moves}, solved={solved}, reason={reason}")
                 if solved:
+                    print(f"    > Result (Attempt {attempt_num+1}): api_calls={api_calls}, moves={moves}, solved={solved}")
                     model_succeeded_at_least_once = True
+                else:
+                    print(f"    > Result (Attempt {attempt_num+1}): api_calls={api_calls}, moves={moves}, solved={solved}, stop_reason={stop_reason}")
 
             model_results[model_key]["attempts"].extend(run_results_for_model_at_size)
             save_incremental_log(provider, model, model_results[model_key], main_run_timestamp, main_run_dir)
