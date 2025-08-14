@@ -37,8 +37,15 @@ Rubiks-Slider-Lite/
    ```sh
    pip install -r requirements.txt
    ```
-2. **Set API Keys**: Create a `.env` file in the `benchmark/` directory for your LLM provider API keys (e.g., `OPENAI_API_KEY=...`). You can use `benchmark/.env.sample` as a template.
+2. **Set API Keys**: Create a `.env` file in the `benchmark/` directory for your LLM provider API keys (e.g., `OPENAI_API_KEY=...`).
+
+OPENAI_API_KEY = ""
+GEMINI_API_KEY = ""
+ANTHROPIC_API_KEY = ""
+OPENROUTER_API_KEY = ""
+
 3. **Configure**: Edit `benchmark/benchmark_config.json` to select the models to test.
+
 4. **Execute**:
    ```sh
    python -m benchmark
