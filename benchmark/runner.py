@@ -3,622 +3,362 @@ Run with python -m benchmark.runner
 """
 
 import json
+import re
+import yaml
 import os
 import sys
 import time
 import argparse
 import pathlib
+import random
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict
 
 from .providers import chat
 from core.puzzle import Puzzle, parse_simple_move
-from .settings import (
-    LOG_DIR,
-    CONFIG_FILE,
-    now_timestamp,
-    get_shuffle_sequence,
-    sanitize_model_name,
-)
 
-# -------------------- Utility Functions --------------------
+LOG_DIR = Path("benchmark/logs")
+LOG_DIR.mkdir(exist_ok=True)
+CONFIG_FILE = "benchmark/benchmark_config.yaml"
+
+def now_timestamp():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def _random_shuffle_count(size: int) -> int:
+    min_moves = size
+    max_moves = size * size * 2
+    return random.randint(min_moves, max_moves)
+
+def generate_shuffle_sequence(size, moves=None):
+    moves = moves if moves is not None else _random_shuffle_count(size)
+    seq = []
+    for _ in range(moves):
+        move_type = random.choice(["row", "column"])
+        idx = random.randint(1, size)
+        direction = random.choice(["left", "right"]) if move_type == "row" else random.choice(["up", "down"])
+        seq.append({"type": move_type, "index": idx, "direction": direction})
+    return seq
+
+def get_shuffle_sequence(size: int) -> List[Dict]:
+    return generate_shuffle_sequence(size)
+
+def sanitize_model_name(model):
+    model_str = str(model) if model is not None else "default"
+    return model_str.replace("/", "_").replace(" ", "_").replace(":", "_")
+
 
 def ensure_directory(path):
-    """Ensure a directory exists."""
     os.makedirs(path, exist_ok=True)
 
-def read_json_file(path):
-    """Load a JSON file and return its contents, or None on error."""
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Warning: Could not read or parse JSON file {path}: {e}")
-        return None
+
+def read_yaml_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
 
 def write_json_file(data, path):
-    """Save data as JSON to a file, ensuring the directory exists."""
-    try:
-        ensure_directory(os.path.dirname(path))
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"Error saving JSON to {path}: {e}")
+    ensure_directory(os.path.dirname(path))
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
-# -------------------- Config Loading --------------------
 
 def read_benchmarks_config():
-    """Load benchmark run configurations from the config file."""
     config_path = pathlib.Path(CONFIG_FILE)
-    if config_path.exists():
-        cfg = read_json_file(config_path)
-        if not cfg:
-            return []
-        bench_list = cfg.get("benchmarks", [])
-        if not isinstance(bench_list, list):
-            print(f"Warning: 'benchmarks' in {CONFIG_FILE} is not a list. Using empty run list.")
-            return []
-        return bench_list
-    print(f"Config not found → {CONFIG_FILE}. Using empty run list.")
-    return []
+    if not config_path.exists():
+        return []
+    cfg = read_yaml_file(config_path)
+    return cfg.get("benchmarks", []) if cfg else []
 
-# -------------------- Prompt Construction --------------------
 
 INSTRUCTIONS_TEXT = """- Output your next move or sequence of moves (e.g., `R1 L`, `C2 U`, or `R1 L; C2 U; R3 R`) inside `<move>` tags.
 - Example: `<move>R1 L; C2 U</move>`
 - Do NOT include any reasoning or explanations. Only output your move(s) in the required format.
 - You must respond with at least one move inside `<move>` tags."""
 
+
 def build_prompt(mode: str, puzzle: Puzzle, grid_size: int, move_count: int) -> str:
-    """
-    Build a user prompt. Modes:
-      - "initial": full instructions + examples + **Current State:** marker
-      - "followup": current state + instructions
-      - "failed_parse": previous move(s) could not be parsed + current state + instructions
-    """
-    base_state_block = "\n".join([
-        "```",
-        puzzle.get_state_string(formatted=False),
-        "```",
-    ])
+    base_state_block = f"```\n{puzzle.get_state_string()}\n```"
 
     if mode == "initial":
         solved_board_str = "\n".join(" ".join(row) for row in puzzle.solved_board)
-        ex_board_before_row_str = "A B C\nD E F\nG H I"
-        ex_board_after_row_str = "B C A\nD E F\nG H I"
-        ex_board_before_col_str = "A B C\nD E F\nG H I"
-        ex_board_after_col_str = "A H C\nD B F\nG E I"
-        lines = [
-            "# Welcome to Rubiks Slider!",
-            "",
-            "**Instructions:**",
-            "",
-            INSTRUCTIONS_TEXT,
-            "",
-            "**How to play:**",
-            "",
-            "- You can shift rows left (L) or right (R).",
-            "  - Example: `R1 L` shifts row 1 left.",
-            "    ```",
-            f"{ex_board_before_row_str}",
-            "    ```",
-            "    becomes:",
-            "    ```",
-            f"{ex_board_after_row_str}",
-            "    ```",
-            "- You can shift columns up (U) or down (D).",
-            "  - Example: `C2 D` shifts column 2 down.",
-            "    ```",
-            f"{ex_board_before_col_str}",
-            "    ```",
-            "    becomes:",
-            "    ```",
-            f"{ex_board_after_col_str}",
-            "    ```",
-            "- You may output multiple moves per turn, separated by semicolons (`;`).",
-            "",
-            "**Goal:** Return Rubiks Slider to the solved state:",
-            "",
-            "```",
-            solved_board_str,
-            "```",
-            "",
-            "**Current State:**",
-            "",
-            base_state_block,
-            "",
-            "**Moves made:** 0",
-        ]
-        return "\n".join(lines)
+        return f"""# Welcome to Rubiks Slider!
+
+**Instructions:**
+
+{INSTRUCTIONS_TEXT}
+
+**How to play:**
+
+- You can shift rows left (L) or right (R).
+  - Example: `R1 L` shifts row 1 left.
+    ```
+A B C
+D E F
+G H I
+    ```
+    becomes:
+    ```
+B C A
+D E F
+G H I
+    ```
+- You can shift columns up (U) or down (D).
+  - Example: `C2 D` shifts column 2 down.
+    ```
+A B C
+D E F
+G H I
+    ```
+    becomes:
+    ```
+A H C
+D B F
+G E I
+    ```
+- You may output multiple moves per turn, separated by semicolons (`;`).
+
+**Goal:** Return Rubiks Slider to the solved state:
+
+```
+{solved_board_str}
+```
+
+**Current State:**
+
+{base_state_block}
+
+**Moves made:** 0"""
 
     if mode == "failed_parse":
-        return "\n".join([
-            "## Your previous move(s) could not be parsed.",
-            "",
-            "Please carefully output your next move or sequence of moves using the following format:",
-            "",
-            "- Enclose your move(s) in <move>...</move> tags.",
-            "- Each move should be in the form `R1 L`, `C2 U`, etc. (e.g., `R1 L; C2 U; R3 R` for multiple moves, separated by semicolons).",
-            "- Example: `<move>R1 L; C2 U</move>`",
-            "- Do not include any other formatting or explanations inside the <move> tags.",
-            "",
-            f"## Current State ({grid_size}x{grid_size})",
-            "",
-            base_state_block,
-            "",
-            f"**Moves made:** {move_count}",
-        ])
+        return f"""## Your previous move(s) could not be parsed.
 
-    # followup
-    return "\n".join([
-        f"## Current State ({grid_size}x{grid_size})",
-        "",
-        base_state_block,
-        "",
-        f"**Moves made:** {move_count}",
-        "",
-        "**Instructions:**",
-        "",
-        INSTRUCTIONS_TEXT,
-    ])
+Please carefully output your next move or sequence of moves using the following format:
 
-# -------------------- LLM Call + Parsing --------------------
+- Enclose your move(s) in <move>...</move> tags.
+- Each move should be in the form `R1 L`, `C2 U`, etc. (e.g., `R1 L; C2 U; R3 R` for multiple moves, separated by semicolons).
+- Example: `<move>R1 L; C2 U</move>`
+- Do not include any other formatting or explanations inside the <move> tags.
 
-def invoke_model(messages, provider, model, model_config):
-    """
-    Call provider.chat and return (reply, reasoning, wall_time, run_errors).
-    On failure, reply is None and run_errors contains a single error dict.
-    """
+## Current State ({grid_size}x{grid_size})
+
+{base_state_block}
+
+**Moves made:** {move_count}"""
+
+    return f"""## Current State ({grid_size}x{grid_size})
+
+{base_state_block}
+
+**Moves made:** {move_count}
+
+**Instructions:**
+
+{INSTRUCTIONS_TEXT}"""
+
+
+def invoke_model(messages, model):
     start = time.time()
-    try:
-        reply, reasoning = chat(messages, provider, model, model_config)
-    except RuntimeError as e:
-        return None, None, 0.0, [{"type": "API Error", "details": f"API Error: {str(e)}"}]
-    except Exception as e:
-        return None, None, 0.0, [{"type": "API Call Exception", "details": f"API Call Exception: {str(e)}"}]
-    wall = time.time() - start
-    if reply is None:
-        return None, None, wall, [{"type": "API Error", "details": "API call failed or returned None."}]
-    return reply, reasoning, wall, []
+    reply, reasoning = chat(messages, model)
+    return reply, reasoning, time.time() - start
+
 
 def parse_moves(response_text: str, grid_size: int):
-    """
-    Extract and parse one or more moves from the LLM's response.
-    Returns a list of move dicts, or None on error.
-    """
-    import re
     match = re.search(r"<move>(.*?)</move>", response_text, re.IGNORECASE | re.DOTALL)
     if not match:
         return None
     move_block = match.group(1).strip()
     if not move_block:
         return None
-    # Split on semicolons or newlines, allow for multiple moves
     move_strs = [m.strip() for m in re.split(r"[;\n]", move_block) if m.strip()]
     move_dicts = []
     for simple_move_str in move_strs:
         json_move_str, error_msg = parse_simple_move(simple_move_str, grid_size)
         if error_msg:
             return None
-        try:
-            move_dict = json.loads(json_move_str)
-            move_dicts.append(move_dict)
-        except Exception:
-            return None
-    if not move_dicts:
-        return None
-    return move_dicts
+        move_dicts.append(json.loads(json_move_str))
+    return move_dicts if move_dicts else None
 
-def append_conversation_turn(prompt: str, reply: str, reasoning: str | None):
-    """Create conversation history entries for user prompt and assistant reply."""
-    return [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": reply, "reasoning": reasoning},
-    ]
 
-# -------------------- Scenario Helpers --------------------
+def apply_shuffle_sequence(puzzle: Puzzle, shuffle_sequence, grid_size: int):
+    for move in shuffle_sequence:
+        if 1 <= move.get("index", -1) <= grid_size:
+            puzzle.apply_move_from_json(json.dumps(move))
 
-def apply_shuffle_sequence(puzzle: Puzzle, shared_shuffle_sequence, grid_size: int):
-    """
-    Apply a validated shuffle sequence to the Rubiks Slider board.
-    Returns (ok: bool, error_message: str | None, move_json: str | None).
-    """
-    valid_shuffle_sequence = [
-        move for move in shared_shuffle_sequence
-        if 1 <= move.get("index", -1) <= grid_size
-    ]
-    for move in valid_shuffle_sequence:
-        move_json = json.dumps(move)
-        success, message = puzzle.apply_move_from_json(move_json)
-        if not success:
-            return False, f"Shared Shuffle Error: {message}", move_json
-    return True, None, None
 
-def build_run_result(
-    termination_reason,
-    solved,
-    puzzle,
-    api_calls_made,
-    total_individual_moves_applied,
-    llm_move_sequence,
-    error_message,
-    time_spent,
-    conversation_history,
-    run_errors,
-):
-    """Construct the benchmark result dictionary."""
-    return {
-        "summary": {
-            "termination_reason": termination_reason,
-            "error_message": error_message,
-            "solved": solved,
-            "api_calls_made": api_calls_made,
-            "total_individual_moves_applied": total_individual_moves_applied,
-            "final_board_state": puzzle.get_state_string(formatted=False),
-            "llm_move_sequence": llm_move_sequence,
-            "time_spent": time_spent,
-        },
-        "conversation_history": conversation_history,
-        "run_errors": run_errors,
-    }
-
-# -------------------- Benchmark Scenario --------------------
-
-def run_benchmark_scenario(
-    grid_size,
-    provider,
-    model,
-    shared_shuffle_sequence,
-    model_config=None,
-):
-    """Run a single benchmark scenario for a given model and Rubiks Slider configuration."""
+def run_benchmark_scenario(grid_size, model, shuffle_sequence):
     puzzle = Puzzle(size=grid_size, auto_shuffle=False)
-
-    ok, shuffle_err, shuffle_move_json = apply_shuffle_sequence(puzzle, shared_shuffle_sequence, grid_size)
-    if not ok:
-        print(f"ERROR applying shared shuffle move: {shuffle_err} - {shuffle_move_json}")
-        return build_run_result(
-            termination_reason="Internal Shuffle Error",
-            solved=False,
-            puzzle=puzzle,
-            api_calls_made=0,
-            total_individual_moves_applied=0,
-            llm_move_sequence=[],
-            error_message=shuffle_err,
-            time_spent=0.0,
-            conversation_history=[],
-            run_errors=[{"type": "Shuffle Error", "details": shuffle_err}],
-        )
+    apply_shuffle_sequence(puzzle, shuffle_sequence, grid_size)
 
     if puzzle.is_solved():
-        return build_run_result(
-            termination_reason="Already Solved",
-            solved=True,
-            puzzle=puzzle,
-            api_calls_made=0,
-            total_individual_moves_applied=0,
-            llm_move_sequence=[],
-            error_message=None,
-            time_spent=0.0,
-            conversation_history=[],
-            run_errors=[],
-        )
+        return {
+            "solved": True,
+            "api_calls": 0,
+            "moves": 0,
+            "time_spent": 0.0,
+            "conversation": [],
+            "termination_reason": "Already Solved",
+        }
 
-    return run_game_loop(
-        puzzle=puzzle,
-        grid_size=grid_size,
-        provider=provider,
-        model=model,
-        shared_shuffle_sequence=shared_shuffle_sequence,
-        model_config=model_config,
-    )
-
-def run_game_loop(
-    puzzle,
-    grid_size,
-    provider,
-    model,
-    shared_shuffle_sequence,
-    model_config,
-):
-    """Main loop for LLM move generation and Rubiks Slider solving."""
-    individual_move_counter = 0
-    api_call_counter = 0
-    llm_move_sequence = []
-    termination_reason = ""
-    conversation_history = []
-    run_errors = []
-    error_message = None
-    total_time_spent = 0.0
-    FIXED_LIMITS = {3: 50, 4: 100, 5: 200, 6: 400}
-    max_moves_allowed = FIXED_LIMITS.get(grid_size, len(shared_shuffle_sequence))
-
-    failed_parse_last_turn = False
+    move_count = 0
+    api_calls = 0
+    conversation = []
+    total_time = 0.0
+    failed_parse_last = False
 
     while not puzzle.is_solved():
-        if individual_move_counter >= max_moves_allowed:
-            termination_reason = "Exceeded Move Limit"
-            break
+        print(f"    > Attempting call {api_calls + 1} ...")
 
-        print(f"    > Attempting call {api_call_counter + 1} ...")
-
-        # Determine prompt mode
-        if failed_parse_last_turn:
+        if failed_parse_last:
             mode = "failed_parse"
-        elif not conversation_history:  # first turn
+        elif not conversation:
             mode = "initial"
         else:
             mode = "followup"
 
-        prompt = build_prompt(mode, puzzle, grid_size, individual_move_counter)
-        api_messages = (conversation_history or []) + [{"role": "user", "content": prompt}]
+        prompt = build_prompt(mode, puzzle, grid_size, move_count)
+        messages = conversation + [{"role": "user", "content": prompt}]
 
-        reply, reasoning, api_wall_time, api_errors = invoke_model(
-            api_messages, provider, model, model_config
-        )
-        total_time_spent += api_wall_time
-        api_call_counter += 1
+        reply, reasoning, wall_time = invoke_model(messages, model)
+        total_time += wall_time
+        api_calls += 1
 
-        if api_errors:
-            termination_reason = "API Error"
-            error_message = api_errors[0].get("details")
-            # annotate with api_call_number
-            for err in api_errors:
-                if "api_call_number" not in err:
-                    err["api_call_number"] = api_call_counter
-            run_errors.extend(api_errors)
-            break
-
-        # Record conversation only when we have a reply
-        conversation_history.extend(append_conversation_turn(prompt, reply, reasoning))
+        conversation.append({"role": "user", "content": prompt})
+        conversation.append({"role": "assistant", "content": reply, "reasoning": reasoning})
 
         extracted_moves = parse_moves(reply, grid_size)
         if extracted_moves is None:
-            if not failed_parse_last_turn:
-                failed_parse_last_turn = True
+            if not failed_parse_last:
+                failed_parse_last = True
                 continue
+            return {
+                "solved": False,
+                "api_calls": api_calls,
+                "moves": move_count,
+                "time_spent": total_time,
+                "conversation": conversation,
+                "termination_reason": "Invalid Move/Response Format",
+            }
 
-            termination_reason = "Invalid Move/Response Format"
-            error_message = "Failed to parse a valid move or moves from LLM response."
-            last_response = conversation_history[-1]["content"] if conversation_history else ""
-            run_errors.append({
-                "type": "Parsing Failure",
-                "api_call_number": api_call_counter,
-                "response_content": last_response,
-                "details": error_message
-            })
-            break
-        else:
-            failed_parse_last_turn = False
+        failed_parse_last = False
 
         for move_dict in extracted_moves:
-            if individual_move_counter >= max_moves_allowed:
-                termination_reason = "Exceeded Move Limit"
-                break
-
-            move_json_string = ""
-            try:
-                move_json_string = json.dumps(move_dict)
-                success, message = puzzle.apply_move_from_json(move_json_string)
-            except TypeError as e:
-                termination_reason = "Move Serialization Error"
-                error_message = f"Error serializing extracted move to JSON: {e}"
-                run_errors.append({
-                    "type": "Move Serialization Error",
-                    "api_call_number": api_call_counter,
-                    "move_dict": move_dict,
-                    "details": error_message
-                })
-                break
-            except Exception as apply_e:
-                termination_reason = "Move Apply Exception"
-                error_message = f"Move Apply Exception: {str(apply_e)}"
-                run_errors.append({
-                    "type": "Move Apply Exception",
-                    "api_call_number": api_call_counter,
-                    "move_json": move_json_string,
-                    "details": error_message
-                })
-                break
-
+            success, _ = puzzle.apply_move_from_json(json.dumps(move_dict))
             if success:
-                llm_move_sequence.append(move_dict)
-                individual_move_counter += 1
+                move_count += 1
                 if puzzle.is_solved():
                     break
             else:
-                termination_reason = "Invalid Move Applied"
-                error_message = f"Failed to apply LLM move: {message}"
-                run_errors.append({
-                    "type": "Invalid Move Applied",
-                    "api_call_number": api_call_counter,
-                    "move_json": move_json_string,
-                    "details": error_message
-                })
-                break
+                return {
+                    "solved": False,
+                    "api_calls": api_calls,
+                    "moves": move_count,
+                    "time_spent": total_time,
+                    "conversation": conversation,
+                    "termination_reason": "Invalid Move Applied",
+                }
 
-        if termination_reason:
-            break
-
-    if not termination_reason:
-        termination_reason = "Solved" if puzzle.is_solved() else "Unknown (Loop Exit)"
-
-    solved_status = puzzle.is_solved()
-    return build_run_result(
-        termination_reason=termination_reason,
-        solved=solved_status,
-        puzzle=puzzle,
-        api_calls_made=api_call_counter,
-        total_individual_moves_applied=individual_move_counter,
-        llm_move_sequence=llm_move_sequence,
-        error_message=error_message,
-        time_spent=total_time_spent,
-        conversation_history=conversation_history,
-        run_errors=run_errors,
-    )
-
-# -------------------- Incremental Logging --------------------
-
-def save_incremental_log(provider, model, results, main_run_timestamp, main_run_dir):
-    """Save the current results for a model incrementally."""
-    model_id = f"{provider}_{sanitize_model_name(model)}"
-    max_solved_size = max((lvl.get("size", 0) for lvl in results.get("attempts", []) if lvl.get("solved")), default=0)
-    log_data = {
-        "provider": provider,
-        "model": model,
-        "attempts": results.get("attempts", []),
-        "timestamp": main_run_timestamp,
-        "max_solved_size": max_solved_size,
+    return {
+        "solved": True,
+        "api_calls": api_calls,
+        "moves": move_count,
+        "time_spent": total_time,
+        "conversation": conversation,
+        "termination_reason": "Solved",
     }
-    model_dir = os.path.join(main_run_dir, model_id)
-    log_file_path = os.path.join(model_dir, f"{model_id}_results.json")
-    write_json_file(log_data, log_file_path)
-    print(f"    > Incremental results saved: {log_file_path}")
 
-# -------------------- Model Validation & Preparation --------------------
 
-def prepare_model_runs(benchmark_configs):
-    """Validate and prepare model configurations for the benchmark."""
-    model_results = defaultdict(
-        lambda: {
-            "attempts": [],
-            "active": True,
-            "attempts_completed": 0,
-            "config": {},
-        }
-    )
-    all_models_to_run = []
-    valid_configs = True
-    for i, config_entry in enumerate(benchmark_configs):
-        provider = config_entry.get("provider")
-        model = config_entry.get("model")
-        attempts = config_entry.get("attempts", 1)
-        if not provider:
-            print(f"Error: Config entry #{i+1} is missing mandatory 'provider'. Skipping entry: {config_entry}")
-            valid_configs = False
-            continue
-        if not model:
-            print(f"Error: Config entry #{i+1} for provider '{provider}' is missing mandatory 'model'. Skipping entry: {config_entry}")
-            valid_configs = False
-            continue
-        model_key = (provider, model)
-        all_models_to_run.append(model_key)
-        model_results[model_key]["config"] = {"attempts": attempts}
-        model_results[model_key]["active"] = True
-    return model_results, all_models_to_run, valid_configs
+def save_incremental_log(model, results, timestamp, run_dir):
+    model_id = f"openrouter_{sanitize_model_name(model)}"
+    max_solved = max((r["size"] for r in results if r["solved"]), default=0)
+    log_data = {
+        "provider": "openrouter",
+        "model": model,
+        "attempts": results,
+        "timestamp": timestamp,
+        "max_solved_size": max_solved,
+    }
+    model_dir = os.path.join(run_dir, model_id)
+    write_json_file(log_data, os.path.join(model_dir, f"{model_id}_results.json"))
+    print(f"    > Incremental results saved")
 
-# -------------------- Summary Printing --------------------
-
-def print_summary(model_results):
-    """Print a summary of the benchmark results for all models."""
-    print("\n--- Benchmark Complete ---")
-    for (provider, model), results in model_results.items():
-        print(f"\n=== Final Summary for {provider}/{model or 'default'} ===")
-        max_solved_size = max((lvl.get("size", 0) for lvl in results["attempts"] if lvl.get("solved")), default=0)
-        print(f"  Max Size Solved: {max_solved_size if max_solved_size > 0 else 'None'}")
-    print("\n--- Benchmark Execution Finished ---")
-
-# -------------------- Main Benchmark Loop --------------------
 
 def run_benchmark():
-    """Main entrypoint for running the Rubiks Slider benchmark."""
     ap = argparse.ArgumentParser()
-    ap.add_argument("--start-size", type=int, default=3, help="Starting grid size (e.g., 3 for 3x3)")
-    ap.add_argument("--shuffle-moves", type=int, default=10, help="Number of moves to shuffle the board")
+    ap.add_argument("--start-size", type=int, default=3, help="Starting grid size")
+    ap.add_argument("--shuffle-moves", type=int, default=10, help="Number of shuffle moves")
     args = ap.parse_args()
 
     print("--- Rubiks Slider Benchmark ---")
 
     benchmark_configs = read_benchmarks_config()
     if not benchmark_configs:
-        print("No benchmark configurations found in config file. Exiting.")
+        print("No benchmark configurations found. Exiting.")
         sys.exit(1)
 
-    main_run_timestamp = now_timestamp()
-    main_run_dir = os.path.join(LOG_DIR, main_run_timestamp)
-    ensure_directory(main_run_dir)
-    print(f"[*] Main log directory: {main_run_dir}")
+    timestamp = now_timestamp()
+    run_dir = os.path.join(LOG_DIR, timestamp)
+    ensure_directory(run_dir)
+    print(f"[*] Log directory: {run_dir}")
 
-    model_results, all_models_to_run, valid_configs = prepare_model_runs(benchmark_configs)
-    if not valid_configs:
-        print("\nErrors found in benchmark_config.json. Please fix the mandatory 'provider' and 'model' fields. Exiting.")
+    models = []
+    for cfg in benchmark_configs:
+        model = cfg.get("model")
+        if model:
+            models.append(model)
+
+    if not models:
+        print("No valid models found in config. Exiting.")
         sys.exit(1)
 
-    current_grid_size = args.start_size
-    active_models_remaining = set(all_models_to_run)
+    model_results = defaultdict(list)
+    active_models = set(models)
+    current_size = args.start_size
 
-    while active_models_remaining:
-        if current_grid_size > 7:
-            print("\n--- Reached max grid size limit (7). Stopping benchmark. ---")
+    while active_models and current_size <= 7:
+        print(f"\n--- Grid Size: {current_size}x{current_size} ---")
+        shuffle = get_shuffle_sequence(current_size)
+        print(f"  > Using {len(shuffle)} shuffle moves")
+
+        succeeded = set()
+
+        for model in list(active_models):
+            print(f"\n  --- Testing openrouter/{model} ---")
+
+            result = run_benchmark_scenario(current_size, model, shuffle)
+            
+            run_data = {
+                "size": current_size,
+                "moves": result["moves"],
+                "solved": result["solved"],
+                "conversation": result["conversation"],
+                "time_spent": result["time_spent"],
+                "api_calls_made": result["api_calls"],
+            }
+            if not result["solved"]:
+                run_data["stop_reason"] = result["termination_reason"]
+
+            model_results[model].append(run_data)
+            save_incremental_log(model, model_results[model], timestamp, run_dir)
+
+            status = "solved" if result["solved"] else result["termination_reason"]
+            print(f"    > Result: api_calls={result['api_calls']}, moves={result['moves']}, {status}")
+
+            if result["solved"]:
+                succeeded.add(model)
+
+        if not succeeded:
+            print(f"\n--- No models succeeded at size {current_size}. Stopping. ---")
             break
 
-        print(f"\n--- Grid Size: {current_grid_size}×{current_grid_size} ---")
-        current_shuffle = get_shuffle_sequence(current_grid_size)
-        print(f"  > Using shuffle of {len(current_shuffle)} moves for {current_grid_size}x{current_grid_size}.")
+        current_size += 1
 
-        models_succeeded_this_size = set()
-        models_to_test_this_size = list(active_models_remaining)
+    print("\n--- Benchmark Complete ---")
+    for model, results in model_results.items():
+        max_solved = max((r["size"] for r in results if r["solved"]), default=0)
+        print(f"  openrouter/{model}: Max solved = {max_solved or 'None'}")
 
-        for provider, model in models_to_test_this_size:
-            model_key = (provider, model)
-            model_config = model_results[model_key]["config"]
-            attempts_for_model = model_config.get("attempts", 1)
-
-            print(f"\n  --- Testing {provider}/{model or 'default'} ---")
-            run_results_for_model_at_size = []
-            model_succeeded_at_least_once = False
-
-            for attempt_num in range(attempts_for_model):
-                print(f"    * Attempt {attempt_num + 1}/{attempts_for_model}")
-                scenario_result = run_benchmark_scenario(
-                    grid_size=current_grid_size,
-                    provider=provider,
-                    model=model,
-                    shared_shuffle_sequence=current_shuffle,
-                    model_config=model_config,
-                )
-                summary = scenario_result["summary"]
-                moves = summary["total_individual_moves_applied"]
-                solved = summary["solved"]
-                stop_reason = summary["termination_reason"]
-                conversation = scenario_result["conversation_history"]
-
-                run_data = dict(
-                    size=current_grid_size,
-                    moves=moves,
-                    solved=solved,
-                    conversation=conversation,
-                    run_errors=scenario_result.get("run_errors", []),
-                    time_spent=summary["time_spent"],
-                    api_calls_made=summary["api_calls_made"],
-                )
-                if not solved:
-                    run_data["stop_reason"] = stop_reason
-                run_results_for_model_at_size.append(run_data)
-                api_calls = summary["api_calls_made"]
-                if solved:
-                    print(f"    > Result (Attempt {attempt_num+1}): api_calls={api_calls}, moves={moves}, solved={solved}")
-                    model_succeeded_at_least_once = True
-                else:
-                    print(f"    > Result (Attempt {attempt_num+1}): api_calls={api_calls}, moves={moves}, solved={solved}, stop_reason={stop_reason}")
-
-            model_results[model_key]["attempts"].extend(run_results_for_model_at_size)
-            save_incremental_log(provider, model, model_results[model_key], main_run_timestamp, main_run_dir)
-
-            if not model_succeeded_at_least_once:
-                print(f"    > {provider}/{model or 'default'} failed on all attempts — stopping for this model.")
-                active_models_remaining.remove(model_key)
-            else:
-                models_succeeded_this_size.add(model_key)
-
-        if not models_succeeded_this_size:
-            print(f"\n--- No models succeeded at size {current_grid_size}. Stopping benchmark. ---")
-            break
-
-        current_grid_size += 1
-
-    print_summary(model_results)
-
-# -------------------- Entrypoint --------------------
 
 if __name__ == "__main__":
     run_benchmark()

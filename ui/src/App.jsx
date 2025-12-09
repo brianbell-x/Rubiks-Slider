@@ -15,7 +15,6 @@ import {
 } from "./game.js";
 
 export default function App() {
-  // Core state (kept minimal, mirrors MVP)
   const [size, setSize] = useState(6);
   const [board, setBoard] = useState(() => buildTileBoard(6, solvedLetters(6)));
   const [startBoard, setStartBoard] = useState(() => deepCopyBoard(board));
@@ -30,16 +29,13 @@ export default function App() {
   const [solvedVisible, setSolvedVisible] = useState(false);
   const [limitVisible, setLimitVisible] = useState(false);
   const [solvedMessage, setSolvedMessage] = useState("Solved!");
-  const [newSaltCounter, setNewSaltCounter] = useState(0);
 
-  // Mini-map canvas ref
   const miniRef = useRef(null);
 
   function updateLimitForSize(nextSize) {
     setLimitMoves(FIXED_LIMITS[nextSize] || nextSize * nextSize * 2);
   }
 
-  // Mini-map drawing (solved-state preview)
   function drawMiniMap(n) {
     const canvas = miniRef.current;
     if (!canvas) return;
@@ -61,11 +57,9 @@ export default function App() {
     }
   }
 
-  // Perform one user move (row/column, 1-based index, direction)
   function performMove(move) {
     if (animating || outOfMoves) return;
 
-    // Enforce move limit exactly like benchmark
     if (moveCount >= limitMoves) {
       setLimitVisible(true);
       setOutOfMoves(true);
@@ -79,7 +73,6 @@ export default function App() {
     setBoard(next);
     setMoveCount((c) => c + 1);
 
-    // After animation period, clear animating and check solved
     window.setTimeout(() => {
       setAnimating(false);
       if (isSolved(next)) {
@@ -95,7 +88,6 @@ export default function App() {
     }, 230);
   }
 
-  // Reset to the start state for this puzzle
   function resetPuzzle() {
     setBoard(deepCopyBoard(startBoard));
     setMoveCount(0);
@@ -104,12 +96,10 @@ export default function App() {
     setLimitVisible(false);
   }
 
-  // New deterministic puzzle for current size, with session salt increment
   function newDeterministicPuzzleForSize(n) {
     const letters = solvedLetters(n);
     const fresh = buildTileBoard(n, letters);
-    const nextSalt = newSaltCounter + 1;
-    const seq = generateDeterministicSequence(n, null, `_salt${nextSalt}`);
+    const seq = generateDeterministicSequence(n);
     setShuffleSeq(seq);
 
     const applied = deepCopyBoard(fresh);
@@ -121,11 +111,9 @@ export default function App() {
     setOutOfMoves(false);
     setSolvedVisible(false);
     setLimitVisible(false);
-    setNewSaltCounter(nextSalt);
     drawMiniMap(n);
   }
 
-  // Progressive level control
   function startLevel(n) {
     setSize(n);
     updateLimitForSize(n);
@@ -136,7 +124,6 @@ export default function App() {
     const letters = solvedLetters(n);
     const base = buildTileBoard(n, letters);
 
-    // Per-size deterministic sequence (no salt) to match benchmark-like behavior
     const seq = generateDeterministicSequence(n);
     setShuffleSeq(seq);
 
@@ -161,7 +148,6 @@ export default function App() {
     startLevel(levelSizes[nextIdx]);
   }
 
-  // Initialize from URL query
   useEffect(() => {
     const { size: qSize, p, progressive: qProgressive } = parseQuery(window.location.search);
     const singlePuzzle = !!p;
@@ -171,11 +157,10 @@ export default function App() {
 
     if (useProgressive) {
       setLevelIndex(0);
-      startLevel(levelSizes[0]); // 3x3
+      startLevel(levelSizes[0]); 
       return;
     }
 
-    // Single puzzle mode
     const n = qSize;
     setSize(n);
     updateLimitForSize(n);
@@ -221,7 +206,6 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Actions (buttons)
   function onNew() {
     newDeterministicPuzzleForSize(size);
   }
@@ -263,7 +247,7 @@ export default function App() {
         <div className={`overlay ${solvedVisible ? "show" : ""}`} role="status" aria-live="polite">
           <div className="card">
             <div className="big">{solvedMessage}</div>
-            <div className="hint">{progressive ? "Level complete." : "Level complete."}</div>
+            <div className="hint">Level complete.</div>
             <div className="actions">
               <button onClick={onSolvedReset}>Reset</button>
               <button onClick={onSolvedNew}>New</button>

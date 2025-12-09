@@ -1,87 +1,9 @@
-"""
-Core.py
-"""
-
 import random
 import json
 import copy
 import re
-import os
-from datetime import datetime
 from collections import deque
-from typing import List, Dict, Any, Optional, Tuple
-
-
-# Deterministic RNG aligned with ui/src/game.js and benchmark/settings.py
-def _hash32(s: str) -> int:
-    h = 5381
-    for ch in s:
-        h = ((h << 5) + h) ^ ord(ch)
-        h &= 0xFFFFFFFF
-    return h
-
-def _imul(a: int, b: int) -> int:
-    return ((a & 0xFFFFFFFF) * (b & 0xFFFFFFFF)) & 0xFFFFFFFF
-
-def _mulberry32(a: int):
-    a &= 0xFFFFFFFF
-    def rand():
-        nonlocal a
-        a = (a + 0x6D2B79F5) & 0xFFFFFFFF
-        t = a
-        t = _imul(t ^ (t >> 15), t | 1)
-        t ^= (t + _imul(t ^ (t >> 7), (t | 61)))
-        t &= 0xFFFFFFFF
-        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
-    return rand
-
-class _RNG:
-    def __init__(self, seed_str: str):
-        self._seed = _hash32(seed_str)
-        self._r = _mulberry32(self._seed)
-
-    def rand(self) -> float:
-        return self._r()
-
-    def randint(self, lo: int, hi: int) -> int:
-        if hi < lo:
-            lo, hi = hi, lo
-        return int(self.rand() * (hi - lo + 1)) + lo
-
-    def choice(self, arr):
-        if not arr:
-            raise ValueError("choice() arg is an empty sequence")
-        idx = int(self.rand() * len(arr))
-        if idx == len(arr):  # clamp rare float edge
-            idx = len(arr) - 1
-        return arr[idx]
-
-def _current_version_str() -> str:
-    d = datetime.now()
-    return f"{d.month:02d}{d.day:02d}{d.year:04d}{d.hour:02d}{d.minute:02d}"
-
-def _resolve_version(version: Optional[str]) -> str:
-    if isinstance(version, str) and re.fullmatch(r"\d{12}", version):
-        return version
-    env_v = os.getenv("BENCHMARK_VERSION")
-    if env_v and re.fullmatch(r"\d{12}", env_v):
-        return env_v
-    return _current_version_str()
-
-def get_deterministic_shuffle_count(size: int, version: str) -> int:
-    rng = _RNG(f"ShuffleCount_v{version}_{size}")
-    return rng.randint(size, size * size * 2)
-
-def generate_deterministic_sequence(size: int, version: str, moves: Optional[int] = None):
-    rng = _RNG(f"Benchmark_v{version}_{size}")
-    count = moves if moves is not None else get_deterministic_shuffle_count(size, version)
-    seq: List[Dict[str, Any]] = []
-    for _ in range(count):
-        move_type = rng.choice(["row", "column"])
-        idx = rng.randint(1, size)
-        direction = rng.choice(["left", "right"]) if move_type == "row" else rng.choice(["up", "down"])
-        seq.append({"type": move_type, "index": idx, "direction": direction})
-    return seq
+from typing import List, Dict, Any, Optional
 
 class Puzzle:
     """Rubiks Slider with row/column shifts."""
@@ -91,7 +13,6 @@ class Puzzle:
         size: int = 6,
         auto_shuffle: bool = True,
         shuffle_moves: Optional[int] = None,
-        version: Optional[str] = None,
         target_board: Optional[List[List[str]]] = None,
     ):
         if size < 2:
@@ -114,12 +35,8 @@ class Puzzle:
         self.shuffle_sequence: List[Dict[str, Any]] = []
 
         if auto_shuffle:
-            ver = _resolve_version(version)
-            count = shuffle_moves if shuffle_moves is not None else get_deterministic_shuffle_count(self.size, ver)
-            seq = generate_deterministic_sequence(self.size, ver, count)
-            self.shuffle_sequence = copy.deepcopy(seq)
-            for m in seq:
-                self._apply_move_internal(m["type"], m["index"] - 1, m["direction"])
+            moves_to_apply = shuffle_moves if shuffle_moves is not None else random.randint(self.size, self.size * self.size * 2)
+            self._shuffle_board(moves_to_apply)
 
     def _create_solved_board(self) -> List[List[str]]:
         start_char_code = ord("A")
@@ -150,21 +67,15 @@ class Puzzle:
 
     @staticmethod
     def _reverse_move(move: Dict[str, Any]) -> Dict[str, Any]:
-        if not move or "direction" not in move:
-            return move
         inverted_move = copy.deepcopy(move)
         direction = inverted_move["direction"]
         opposites = {"left": "right", "right": "left", "up": "down", "down": "up"}
-        if direction in opposites:
-            inverted_move["direction"] = opposites[direction]
+        inverted_move["direction"] = opposites[direction]
         return inverted_move
 
     @staticmethod
     def reverse_sequence(sequence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [Puzzle._reverse_move(move) for move in reversed(sequence)]
-
-    def get_solution_key(self) -> List[Dict[str, Any]]:
-        return Puzzle.reverse_sequence(self.shuffle_sequence)
 
     def display_board(self):
         for row in self.board:
@@ -199,16 +110,13 @@ class Puzzle:
 
         move_type = move_data.get("type")
         direction = move_data.get("direction")
-        try:
-            index = int(move_data.get("index"))
-            if not (1 <= index <= self.size):
-                raise ValueError()
-            internal_index = index - 1
-        except (ValueError, TypeError):
+        index = move_data.get("index")
+        if not isinstance(index, int) or not (1 <= index <= self.size):
             return (
                 False,
                 f"Invalid index. Must be an integer between 1 and {self.size}.",
             )
+        internal_index = index - 1
 
         if move_type == "row" and direction in ["left", "right"]:
             self._apply_move_internal(move_type, internal_index, direction)
@@ -222,7 +130,7 @@ class Puzzle:
     def is_solved(self) -> bool:
         return self.board == self.solved_board
 
-    def get_state_string(self, formatted: bool = False) -> str:
+    def get_state_string(self) -> str:
         return "\n".join(" ".join(row) for row in self.board)
 
 def parse_simple_move(input_str: str, grid_size: int):

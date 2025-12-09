@@ -1,22 +1,13 @@
-/**
- * Game logic and utilities shared by React components.
- * Mirrors benchmark/settings.py seeds and core/puzzle.py move semantics.
- */
-
-// Constants aligned with MVP and benchmark
 export const FIXED_LIMITS = { 3: 50, 4: 100, 5: 200, 6: 400 };
-// Keep aligned with benchmark/settings.py VERSION
+
 function getVersionFromQuery(search = typeof window !== "undefined" ? window.location.search : "") {
-  try {
-    const params = new URLSearchParams(search || "");
-    const v = params.get("version");
-    if (v && /^\d{12}$/.test(v)) return v;
-  } catch (e) {}
+  const params = new URLSearchParams(search || "");
+  const v = params.get("version");
+  if (v && /^\d{12}$/.test(v)) return v;
   return null;
 }
 export const VERSION = getVersionFromQuery() || makeVersionNow();
 
-// Palette and color mapping based on letter
 export const PALETTE = [
   "#e6194B", // A Red
   "#4363d8", // B Blue
@@ -39,7 +30,6 @@ export function colorForLetter(ch) {
   return PALETTE[(idx + PALETTE.length) % PALETTE.length];
 }
 
-// Query parsing
 export function clampInt(n, lo, hi) {
   if (Number.isNaN(n)) return lo;
   return Math.max(lo, Math.min(hi, n));
@@ -54,7 +44,6 @@ export function parseQuery(search = window.location.search) {
   };
 }
 
-// Base64 URL helpers
 export function toBase64Url(str) {
   const b = btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return b;
@@ -65,7 +54,6 @@ export function fromBase64Url(b64url) {
   return atob(b64);
 }
 
-// Deterministic RNG: hash32 + mulberry32
 export function hash32(str) {
   let h = 5381 >>> 0;
   for (let i = 0; i < str.length; i++) {
@@ -110,7 +98,6 @@ export function generateDeterministicSequence(size, moves = null, salt = "") {
   return seq;
 }
 
-// Version string used by MVP (not displayed but kept for parity)
 export function makeVersionNow() {
   const d = new Date();
   const pad = (n) => n.toString().padStart(2, "0");
@@ -122,7 +109,6 @@ export function makeVersionNow() {
   return `${MM}${DD}${YYYY}${HH}${mm}`;
 }
 
-// Board helpers
 export function solvedLetters(size) {
   const grid = [];
   for (let r = 0; r < size; r++) {
@@ -158,7 +144,6 @@ export function isSolved(board) {
   return true;
 }
 
-// One-cell wrap-around shift (matches core/puzzle.py semantics)
 export function applyMove(board, move) {
   const n = board.length;
   const idx = move.index - 1;

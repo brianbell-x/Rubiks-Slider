@@ -1,24 +1,16 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 import { colorForLetter } from "./game.js";
 
-/**
- * Board component
- * - Absolutely positioned tiles
- * - Handles pointer drag and commits a single row/column move via onCommitMove
- * - No live preview; commit on release if threshold passed (matches MVP)
- */
 export default function Board({ size, board, onCommitMove }) {
   const boardRef = useRef(null);
   const [dims, setDims] = useState({ width: 0, gap: 6, cell: 0, offset: 0 });
 
-  // Read CSS var --tile-gap from :root
   const computeGap = () => {
     const v = getComputedStyle(document.documentElement).getPropertyValue("--tile-gap");
     const parsed = parseInt(v, 10);
     return Number.isFinite(parsed) ? parsed : 6;
   };
 
-  // Measure on mount and on resize
   useLayoutEffect(() => {
     const el = boardRef.current;
     if (!el) return;
@@ -36,12 +28,11 @@ export default function Board({ size, board, onCommitMove }) {
     ro.observe(el);
     window.addEventListener("resize", measure);
     return () => {
-      try { ro.disconnect(); } catch {}
+      ro.disconnect();
       window.removeEventListener("resize", measure);
     };
   }, [size]);
 
-  // Precompute tile absolute positions
   const tiles = useMemo(() => {
     const arr = [];
     const n = size;
@@ -69,7 +60,6 @@ export default function Board({ size, board, onCommitMove }) {
     return arr;
   }, [board, size, dims]);
 
-  // Pointer-drag logic (axis lock after small movement)
   const draggingRef = useRef({
     active: false,
     startX: 0,
@@ -83,11 +73,10 @@ export default function Board({ size, board, onCommitMove }) {
     if (!el) return;
 
     function onPointerDown(ev) {
-      // Only begin drag if started on a tile
       const target = ev.target.closest(".tile");
       if (!target || !el.contains(target)) return;
 
-      try { el.setPointerCapture(ev.pointerId); } catch {}
+      el.setPointerCapture(ev.pointerId);
       const d = draggingRef.current;
       d.active = true;
       d.startX = ev.clientX;
@@ -150,7 +139,7 @@ export default function Board({ size, board, onCommitMove }) {
         d.active = false;
         d.axis = null;
         d.lockIndex = null;
-        try { el.releasePointerCapture(ev.pointerId); } catch {}
+        el.releasePointerCapture(ev.pointerId);
       }
     }
 

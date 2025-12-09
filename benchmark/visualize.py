@@ -16,7 +16,7 @@ import os
 import re 
 
 from core.puzzle import Puzzle, parse_simple_move
-from .settings import sanitize_model_name
+from .runner import sanitize_model_name
 
 COLOR_MAP = {
     "A": "#e6194B",  # Red
@@ -31,16 +31,16 @@ COLOR_MAP = {
 
 def draw_board(ax, grid):
     n = len(grid)
-    ax.set_facecolor("black") # Ensure background is black
+    ax.set_facecolor("black")
     ax.clear()
     for y, row in enumerate(grid):
-        for x, col_val in enumerate(row): # Renamed 'col' to 'col_val' to avoid conflict
+        for x, col_val in enumerate(row):
             ax.add_patch(
                 plt.Rectangle(
                     (x, n - y - 1),
                     1,
                     1,
-                    facecolor=COLOR_MAP.get(col_val, "#777777"), # Default to gray
+                    facecolor=COLOR_MAP.get(col_val, "#777777"),
                     edgecolor="black",
                     lw=0.5,
                 )
@@ -51,10 +51,10 @@ def draw_board(ax, grid):
                 col_val,
                 ha="center",
                 va="center",
-                fontsize=32, # Consider adjusting based on grid size if too crowded
+                fontsize=32,
                 color="black",
                 weight="bold",
-                family="DejaVu Sans", # Ensure font supports characters
+                family="DejaVu Sans",
             )
     ax.set_xlim(0, n)
     ax.set_ylim(0, n)
@@ -70,14 +70,12 @@ def extract_moves_from_run_data(run_data, grid_size):
     initial_state = None
     current_state_marker = "**Current State:**"
 
-    # Try to find initial state in user messages first
     for turn in conversation:
         if turn["role"] == "user":
             content = turn["content"]
             marker_pos = content.find(current_state_marker)
             if marker_pos != -1:
                 search_area = content[marker_pos + len(current_state_marker) :]
-                # Regex to find the board within triple backticks
                 m = re.search(
                     r"```\s*((?:[A-Z0-9 ]+\n)+?)\s*```", search_area, re.MULTILINE
                 )
@@ -90,12 +88,11 @@ def extract_moves_from_run_data(run_data, grid_size):
                     ]
                     if board_lines and all(len(line) == len(board_lines[0]) for line in board_lines):
                         initial_state = [list(row) for row in board_lines]
-                        break # Found initial state
-            if initial_state: # Break outer loop if found
+                        break
+            if initial_state:
                 break
     
     if not initial_state:
-        # Fallback: Try to get initial state from 'summary' if present (older logs might have it)
         summary = run_data.get("summary", {})
         initial_board_str = summary.get("initial_board_state_for_visualization")
         if initial_board_str:
@@ -123,10 +120,9 @@ def extract_moves_from_run_data(run_data, grid_size):
     puz = Puzzle(size=grid_size, auto_shuffle=False)
     puz.board = copy.deepcopy(initial_state)
 
-    # Add initial state as the first "step"
     moves_extracted.append(
         {
-            "state_before_move": copy.deepcopy(puz.board), # Not strictly needed for initial
+            "state_before_move": copy.deepcopy(puz.board),
             "state_after_move": copy.deepcopy(puz.board),
             "model_move": "Initial State",
             "model_reasoning": "Starting configuration of Rubiks Slider for this run.",
@@ -150,12 +146,11 @@ def extract_moves_from_run_data(run_data, grid_size):
         
         if reasoning_match:
             reasoning_str = reasoning_match.group(1).strip()
-        elif move_match: # Move found, reasoning missing
-            # Try to get content outside the move tag as reasoning
+        elif move_match:
             reasoning_str = re.sub(r"(?is)<move>.*?</move>", "", content).strip()
             if not reasoning_str:
                 reasoning_str = "No <reasoning> tag or other text found."
-        else: # No move tag, use full content as reasoning
+        else:
             reasoning_str = content.strip()
             if not reasoning_str:
                 reasoning_str = "Empty assistant message."
@@ -168,21 +163,19 @@ def extract_moves_from_run_data(run_data, grid_size):
             move_json_parsed_str, err = parse_simple_move(move_str, grid_size)
             if err:
                 print(f"Warning: Run's move '{move_str}' is invalid: {err}. Board state will not change for this step.")
-                # Keep puz.board as state_before_this_move
                 puz.board = copy.deepcopy(state_before_this_move)
             else:
                 try:
-                    # apply_move_from_json returns (bool, message)
                     success, _msg = puz.apply_move_from_json(move_json_parsed_str)
                     if success:
-                        move_json_parsed = json.loads(move_json_parsed_str) # Store the dict
+                        move_json_parsed = json.loads(move_json_parsed_str)
                     else:
                         print(f"Warning: Run's move '{move_str}' failed to apply: {_msg}. Board state will not change.")
                         puz.board = copy.deepcopy(state_before_this_move)
                 except Exception as e_apply:
                     print(f"Error applying move '{move_str}': {e_apply}. Board state will not change.")
                     puz.board = copy.deepcopy(state_before_this_move)
-        else: # No valid move tag, board does not change
+        else:
             puz.board = copy.deepcopy(state_before_this_move)
 
         state_after_this_move = copy.deepcopy(puz.board)
@@ -209,16 +202,11 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
 
     model_frames = []
     
-    # Figure setup (consider making this adaptive or configurable)
-    fig_w_inches, fig_h_inches, fig_dpi = 12, 6.5, 200 # Slightly taller for suptitle
+    fig_w_inches, fig_h_inches, fig_dpi = 12, 6.5, 200
     fig = plt.figure(figsize=(fig_w_inches, fig_h_inches), facecolor="black", dpi=fig_dpi)
     
-    # Add a super title for the Model ID (without "Model: " prefix)
     fig.suptitle(f"{model_id}", color="white", fontsize=16, weight="bold", y=0.97)
 
-    # GridSpec for board and text areas
-    # Adjust top parameter in GridSpec to make space for suptitle
-    # Give more space to the reasoning text on the right
     outer = fig.add_gridspec(1, 2, width_ratios=[0.35, 0.65], wspace=0.2, left=0.05, right=0.95, bottom=0.05, top=0.85)
     ax_board = fig.add_subplot(outer[0])
     ax_txt = fig.add_subplot(outer[1])
@@ -226,11 +214,10 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
     ax_board.set_aspect("equal", adjustable="box")
     ax_board.set_facecolor("black")
     ax_txt.set_facecolor("black")
-    ax_txt.axis("off") # Turn off axis lines and ticks for text area
+    ax_txt.axis("off")
 
     total_attempts_for_model = len(all_attempts_data)
 
-    # --- Helper function for formatting moves ---
     def _format_move_for_display(move_str: str) -> str:
         """Converts compact move notation to human-readable format."""
         if not move_str or move_str in ["Initial State", "No <move> tag found"]:
@@ -238,14 +225,14 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
 
         match = re.match(r"([RC])(\d+)\s+([LRUD])", move_str, re.IGNORECASE)
         if not match:
-            return move_str # Return original if parsing fails
+            return move_str
 
         type_char, index_str, direction_char = match.groups()
         
         try:
             index = int(index_str)
         except ValueError:
-             return f"{move_str} (Invalid Index)" # Handle non-integer index
+             return f"{move_str} (Invalid Index)"
 
         type_full = "Row" if type_char.upper() == 'R' else "Column"
         
@@ -253,16 +240,14 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
         direction_full = direction_map.get(direction_char.upper())
 
         if not direction_full:
-             return f"{move_str} (Invalid Dir Char)" # Invalid direction character
+             return f"{move_str} (Invalid Dir Char)"
 
-        # Basic validation of direction based on type
         if type_full == "Row" and direction_full not in ["Left", "Right"]:
             return f"{move_str} (Invalid Row Dir)"
         if type_full == "Column" and direction_full not in ["Up", "Down"]:
              return f"{move_str} (Invalid Col Dir)"
 
         return f"{type_full} {index} {direction_full}"
-    # --- End Helper ---
 
     for attempt_idx, attempt_data in enumerate(all_attempts_data):
         attempt_number_in_video = attempt_idx + 1
@@ -278,8 +263,6 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
             steps, _ = extract_moves_from_run_data(attempt_data, grid_size)
         except ValueError as e:
             print(f"Skipping visualization for Attempt {attempt_number_in_video} (Model: {model_id}) due to error: {e}")
-            # Optionally, add a frame indicating this attempt was skipped/error
-            # For now, just skip to next attempt in the video
             continue
         
         if not steps:
@@ -287,54 +270,45 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
             continue
 
         summary = attempt_data.get("summary", {})
-        solved_status = summary.get("solved_status", attempt_data.get("solved", False)) # Check top-level 'solved' too
+        solved_status = summary.get("solved_status", attempt_data.get("solved", False))
 
-        # Try to get termination_reason from summary, then from top-level 'reason'
         termination_reason = summary.get("termination_reason")
         if not termination_reason or termination_reason == "N/A":
             termination_reason = attempt_data.get("stop_reason") or attempt_data.get("reason")
         
-        if not termination_reason: # If still not found, default to "N/A"
+        if not termination_reason:
             termination_reason = "N/A"
             
         attempt_outcome_text = "PASS" if solved_status else f"FAIL ({termination_reason})"
 
-        # Render frames for each step in the current attempt
         for step_idx, step_details in enumerate(steps):
             ax_board.clear()
             ax_txt.clear()
-            fig.texts.clear() # Clear previous figure-level texts
-            # Re-apply suptitle after clearing fig.texts
+            fig.texts.clear()
             fig.suptitle(f"{model_id}", color="white", fontsize=16, weight="bold", y=0.97)
 
             current_board_state = step_details["state_after_move"]
             draw_board(ax_board, current_board_state)
 
-            # Add Attempt/Size info to bottom-right of the figure
             fig.text(0.98, 0.02, f"Attempt {attempt_number_in_video}/{total_attempts_for_model} (Size {grid_size})", 
                      color="grey", fontsize=9, ha="right", va="bottom", transform=fig.transFigure)
 
             move_text = step_details["model_move"]
-            # Combine Move number and LLM move into a single caption below the board
             if step_idx == 0 and move_text == "Initial State":
                 move_caption = "Initial State"
             else:
-                # Format the move_text using the new helper
                 formatted_move = _format_move_for_display(move_text)
-                move_caption = f"Move {step_idx}: {formatted_move}" # Use formatted move here
+                move_caption = f"Move {step_idx}: {formatted_move}"
             
             ax_board.text(0.5, -0.08, move_caption, transform=ax_board.transAxes,
                           ha="center", va="top", color="lightgrey", fontsize=10, weight="bold")
 
-            # Added padding for reasoning title and text
             ax_txt.text(0.03, 0.97, "Reasoning:", color="white", fontsize=10, weight="bold",
                         va="top", transform=ax_txt.transAxes)
             
-            cleaned_reasoning = step_details.get("model_reasoning", "N/A").replace(":", ":\n") # Basic reformat
-            # Increased textwrap width to utilize more horizontal space
+            cleaned_reasoning = step_details.get("model_reasoning", "N/A").replace(":", ":\n")
             wrapped_reasoning = "\n" + textwrap.fill(cleaned_reasoning, width=115) 
-            reasoning_fontsize = 7 if len(cleaned_reasoning) > 500 else 8 # Adjusted threshold slightly
-            # Adjusted y-position for padding and to be relative to title
+            reasoning_fontsize = 7 if len(cleaned_reasoning) > 500 else 8
             ax_txt.text(0.03, 0.97 - 0.07, wrapped_reasoning, color="white", fontsize=reasoning_fontsize,
                         va="top", linespacing=1.3, transform=ax_txt.transAxes, wrap=True)
 
@@ -343,16 +317,13 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
             frame_rgb = frame_rgba[:, :, :3]
             model_frames.append(frame_rgb.copy())
 
-        # Add summary frames for the current attempt
-        summary_duration_frames = fps * 3  # 3 seconds for attempt summary
+        summary_duration_frames = fps * 3
         for _ in range(summary_duration_frames):
-            fig.texts.clear() # Clear previous figure-level texts (like Attempt/Size info)
-            # Re-apply suptitle after clearing fig.texts
+            fig.texts.clear()
             fig.suptitle(f"{model_id}", color="white", fontsize=16, weight="bold", y=0.97)
-            # Board shows the last state of the attempt, text area shows summary
             ax_txt.clear()
             ax_txt.text(0.5, 0.5, f"Attempt {attempt_number_in_video} Result:\n{attempt_outcome_text}",
-                        color="#77DD77" if solved_status else "#FF6961", # Pastel Green / Pastel Red
+                        color="#77DD77" if solved_status else "#FF6961",
                         fontsize=16, weight="bold",
                         va="center", ha="center", transform=ax_txt.transAxes, wrap=True,
                         bbox=dict(boxstyle="round,pad=0.5", fc="black", ec="grey", lw=1))
@@ -362,7 +333,7 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
             frame_rgb = frame_rgba[:, :, :3]
             model_frames.append(frame_rgb.copy())
 
-    plt.close(fig) # Close the figure after all frames are generated
+    plt.close(fig)
 
     if not model_frames:
         print(f"No frames generated for model {model_id}. Video will not be created.")
@@ -378,7 +349,6 @@ def generate_model_video(model_id: str, all_attempts_data: list, video_out_path:
         print("Ensure ffmpeg is installed and accessible by imageio.")
         print("You might need to install it via your system's package manager")
         print("or install the Python package: pip install imageio[ffmpeg]")
-        # Not re-raising here to allow other models to process if in a batch
         
 def run_self_test():
     print("Running embedded self-test for benchmark.visualize (single video per model)...")
@@ -422,15 +392,12 @@ def run_self_test():
         tmp_output_dir = Path(tmp_output_dir_str)
         
         try:
-            # Create a temporary log file with the embedded data
             with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json", encoding="utf-8", dir=tmp_output_dir) as tmp_f:
                 tmp_f.write(EMBEDDED_AGGREGATE_LOG_DATA)
                 temp_log_file_path = Path(tmp_f.name)
             
-            # Call the main processing function that now generates one video per model
             process_aggregate_log(temp_log_file_path, tmp_output_dir, fps=1)
 
-            # Verification: Expect one video for "embedded_test_provider_test_model_log_v2"
             expected_video_filename = sanitize_model_name("embedded_test_provider_test_model_log_v2") + ".mp4"
             expected_video_file = tmp_output_dir / expected_video_filename
             
@@ -473,9 +440,8 @@ def process_aggregate_log(aggregate_log_path: Path, output_dir_path: Path, fps: 
     if not all_attempts_data or not isinstance(all_attempts_data, list):
         raise ValueError(f"Log file {aggregate_log_path.name} does not contain a valid 'attempts' array or is empty.")
 
-    # Determine model_id
     provider = data.get("provider")
-    model_name_from_log = data.get("model") # Renamed to avoid conflict with 'model' module
+    model_name_from_log = data.get("model")
     
     model_id_parts = []
     if provider:
@@ -483,7 +449,7 @@ def process_aggregate_log(aggregate_log_path: Path, output_dir_path: Path, fps: 
     if model_name_from_log:
         model_id_parts.append(model_name_from_log)
     
-    if not model_id_parts: # Fallback to filename if provider/model not in JSON
+    if not model_id_parts:
         base_name = aggregate_log_path.name
         if base_name.endswith("_results.json"):
             model_id_from_filename = base_name[:-len("_results.json")]
@@ -495,14 +461,13 @@ def process_aggregate_log(aggregate_log_path: Path, output_dir_path: Path, fps: 
         model_id = sanitize_model_name("_".join(model_id_parts))
 
     output_dir_path.mkdir(parents=True, exist_ok=True)
-    video_filename = f"{model_id}.mp4" # Single video per model
+    video_filename = f"{model_id}.mp4"
     video_out_path = output_dir_path / video_filename
     
     print(f"\nProcessing all attempts for Model '{model_id}' from {aggregate_log_path.name} -> {video_out_path}")
     try:
         generate_model_video(model_id, all_attempts_data, video_out_path, fps)
     except Exception as e:
-        # Log error but don't necessarily stop if part of a larger batch process
         print(f"Error generating video for Model '{model_id}': {e}")
         import traceback
         traceback.print_exc()

@@ -1,9 +1,0 @@
-{
-  "benchmarks": [
-    {
-      "provider": "openai",
-      "model": "gpt-5",
-      "attempts": 3
-    }
-  ]
-}
