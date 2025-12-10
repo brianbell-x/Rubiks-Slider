@@ -1,3 +1,0 @@
-- remove accuracy from output and rename it to turns.
-- track how many wrong predictions it makes even if its not consecutive.
-- Rename "Phase 1" to
