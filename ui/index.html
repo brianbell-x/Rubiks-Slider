@@ -65,12 +65,61 @@
       button:hover, .btn:hover { background: #243140; border-color: #3a4756; }
       button:active, .btn:active { background: #1d2733; }
       button[disabled] { opacity: 0.5; cursor: default; }
+      button.active { background: var(--accent); color: #0b0c10; border-color: var(--accent); }
 
       .counter {
         margin-left: auto;
         font-size: 14px;
         color: var(--muted);
       }
+
+      .prediction-panel {
+        background: #18202a;
+        border: 1px solid #2b3440;
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .prediction-challenge {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 14px;
+      }
+      .prediction-challenge b { color: var(--accent); }
+      .prediction-challenge input {
+        background: #0b0c10;
+        border: 1px solid #2f3945;
+        color: var(--text);
+        padding: 4px 8px;
+        border-radius: 4px;
+        width: 60px;
+        text-transform: uppercase;
+        text-align: center;
+      }
+      .queue-controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .feedback {
+        font-size: 13px;
+        font-weight: bold;
+        padding: 4px 8px;
+        border-radius: 4px;
+      }
+      .feedback.good { background: rgba(60, 180, 75, 0.2); color: #3cb44b; }
+      .feedback.bad { background: rgba(230, 25, 75, 0.2); color: #e6194B; }
+      .wrong-counter {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .wrong-counter.warn { color: #f58231; }
 
       .board-wrap {
         position: relative;

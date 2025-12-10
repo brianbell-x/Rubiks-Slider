@@ -3,7 +3,7 @@ import json
 import copy
 import re
 from collections import deque
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 class Puzzle:
     """Rubiks Slider with row/column shifts."""
@@ -39,8 +39,61 @@ class Puzzle:
             self._shuffle_board(moves_to_apply)
 
     def _create_solved_board(self) -> List[List[str]]:
-        start_char_code = ord("A")
-        return [[chr(start_char_code + r)] * self.size for r in range(self.size)]
+        return [[str(r * self.size + c + 1) for c in range(self.size)] for r in range(self.size)]
+
+    def get_tile_position(self, tile_number: int) -> Optional[Tuple[int, int]]:
+        """
+        Find the current row and column of a tile by its number.
+        Returns (row, col) as 1-indexed values, or None if not found.
+        """
+        target = str(tile_number)
+        for r in range(self.size):
+            for c in range(self.size):
+                if self.board[r][c] == target:
+                    return (r + 1, c + 1)
+        return None
+
+    def validate_prediction(self, tile_number: int, predicted_position: str) -> bool:
+        """
+        Check if the predicted position matches the actual position of the tile.
+        predicted_position format: "R#C#" (e.g., "R2C3")
+        Returns True if prediction is correct, False otherwise.
+        """
+        actual_pos = self.get_tile_position(tile_number)
+        if not actual_pos:
+            return False
+        
+        match = re.match(r"R(\d+)C(\d+)", predicted_position)
+        if not match:
+            return False
+            
+        pred_row, pred_col = map(int, match.groups())
+        return (pred_row, pred_col) == actual_pos
+
+    def get_labeled_state_string(self) -> str:
+        """
+        Return board state with grid labels for prompts.
+        Format:
+            C1 C2 C3
+        R1   1  2  3
+        R2   4  5  6
+        R3   7  8  9
+        """
+        # Calculate column width based on max number length and column label length
+        max_num_len = len(str(self.size * self.size))
+        max_col_label_len = len(str(self.size)) + 1 # "C" + number
+        col_width = max(max_num_len, max_col_label_len)
+        
+        # Header
+        header = "   " + " ".join(f"C{c+1}".rjust(col_width) for c in range(self.size))
+        
+        rows = []
+        for r in range(self.size):
+            row_label = f"R{r+1}".ljust(2)
+            row_content = " ".join(cell.rjust(col_width) for cell in self.board[r])
+            rows.append(f"{row_label} {row_content}")
+            
+        return header + "\n" + "\n".join(rows)
 
     def _shuffle_board(self, moves: int = 10):
         self.shuffle_sequence = []

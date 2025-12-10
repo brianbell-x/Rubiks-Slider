@@ -18,15 +18,23 @@ import re
 from core.puzzle import Puzzle, parse_simple_move
 from .runner import sanitize_model_name
 
-COLOR_MAP = {
-    "A": "#e6194B",  # Red
-    "B": "#4363d8",  # Blue
-    "C": "#ffe119",  # Yellow
-    "D": "#3cb44b",  # Green
-    "E": "#f58231",  # Orange
-    "F": "#911eb4",  # Purple
-    "G": "#42d4f4"   # Cyan
-}
+# Distinct colors for visualization
+COLORS = [
+    "#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+    "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
+    "#469990", "#dcbeff", "#9A6324", "#fffac8", "#800000",
+    "#aaffc3", "#808000", "#ffd8b1", "#000075", "#a9a9a9"
+]
+
+
+def get_tile_color(val):
+    try:
+        # Try to convert to int (1-based index)
+        idx = int(val) - 1
+        return COLORS[idx % len(COLORS)]
+    except ValueError:
+        # Fallback for non-numeric values
+        return "#777777"
 
 
 def draw_board(ax, grid):
@@ -40,7 +48,7 @@ def draw_board(ax, grid):
                     (x, n - y - 1),
                     1,
                     1,
-                    facecolor=COLOR_MAP.get(col_val, "#777777"),
+                    facecolor=get_tile_color(col_val),
                     edgecolor="black",
                     lw=0.5,
                 )
@@ -82,12 +90,12 @@ def extract_moves_from_run_data(run_data, grid_size):
                 if m:
                     board_str = m.group(1).strip(" \n")
                     board_lines = [
-                        line.strip().replace(" ", "")
+                        line.strip().split()
                         for line in board_str.splitlines()
                         if line.strip()
                     ]
                     if board_lines and all(len(line) == len(board_lines[0]) for line in board_lines):
-                        initial_state = [list(row) for row in board_lines]
+                        initial_state = board_lines
                         break
             if initial_state:
                 break
@@ -97,12 +105,12 @@ def extract_moves_from_run_data(run_data, grid_size):
         initial_board_str = summary.get("initial_board_state_for_visualization")
         if initial_board_str:
              board_lines = [
-                line.strip().replace(" ", "")
+                line.strip().split()
                 for line in initial_board_str.splitlines()
                 if line.strip()
             ]
              if board_lines and all(len(line) == len(board_lines[0]) for line in board_lines):
-                initial_state = [list(row) for row in board_lines]
+                initial_state = board_lines
 
     if not initial_state:
         raise ValueError(
@@ -363,7 +371,7 @@ def run_self_test():
       "solved": true, 
       "reason": "Solved via top-level", 
       "conversation": [
-        {"role": "user", "content": "Initial prompt for attempt 1. **Current State:**\\n```\\nA B C\\nD E F\\nG H I\\n```\\nMake a move."},
+        {"role": "user", "content": "Initial prompt for attempt 1. **Current State:**\\n```\\n1 2 3\\n4 5 6\\n7 8 9\\n```\\nMake a move."},
         {"role": "assistant", "content": "<reasoning>This is reasoning for attempt 1, move 1.</reasoning><move>R1 L</move>"}
       ],
       "run_errors": []
@@ -372,7 +380,7 @@ def run_self_test():
       "size": 2,
       "moves": 5,
       "conversation": [
-        {"role": "user", "content": "Initial prompt for attempt 2. **Current State:**\\n```\\nX Y\\nZ W\\n```\\nMake a move."},
+        {"role": "user", "content": "Initial prompt for attempt 2. **Current State:**\\n```\\n1 2\\n3 4\\n```\\nMake a move."},
         {"role": "assistant", "content": "<reasoning>This is reasoning for attempt 2, move 1.</reasoning><move>C1 U</move>"},
         {"role": "assistant", "content": "<reasoning>This is reasoning for attempt 2, move 2. This reasoning is a bit longer to test text wrapping and see how it fits into the allocated space for the visualization panel, ensuring that it does not overflow or become unreadable due to excessive length or small font size. We need to check if the text wraps correctly and remains legible.</reasoning><move>R2 R</move>"}
       ],

@@ -1,0 +1,2115 @@
+Directory structure:
+└── Rubiks-Slider-Lite/
+    ├── README.md
+    ├── requirements.txt
+    ├── benchmark/
+    │   ├── __init__.py
+    │   ├── __main__.py
+    │   ├── benchmark_config.yaml
+    │   ├── providers.py
+    │   ├── runner.py
+    │   ├── visualize.py
+    │   └── __pycache__/
+    ├── core/
+    │   ├── __init__.py
+    │   ├── puzzle.py
+    │   └── __pycache__/
+    ├── trash/
+    │   ├── problems.md
+    │   └── tasks.md
+    └── ui/
+        ├── index.html
+        ├── package.json
+        └── src/
+            ├── App.jsx
+            ├── Board.jsx
+            ├── game.js
+            └── main.jsx
+
+================================================
+File: README.md
+================================================
+# Rubiks Slider Benchmark
+
+The benchmark is designed to measure a model's ability to handle problems with many interdependent parts, where the consequences of actions are not always immediately clear. Unlike tasks that can be solved by breaking them into independent subproblems, Rubiks Slider requires a holistic understanding of the entire state at all times.
+
+I don't think there is a promptable or trainable solution to this problem, at least not in the sense of memorizing or brute forcing all possible states. As the Rubiks Slider size increases, the number of possible states grows exponentially, quickly exceeding any feasible memory or training capacity.
+
+By observing model performance on this task, we hope to gain insight into their capacity for global reasoning and long horizon planning in environments with deeply entangled states.
+
+
+================================================
+File: requirements.txt
+================================================
+matplotlib
+imageio[v3,ffmpeg]
+pillow
+dotenv
+colorama
+httpx
+openai
+google-generativeai
+anthropic
+pymongo
+pytest
+ruff
+black
+networkx
+numpy
+tqdm
+tiktoken
+backoff
+
+
+
+================================================
+File: benchmark/__init__.py
+================================================
+
+
+
+
+================================================
+File: benchmark/__main__.py
+================================================
+# benchmark/__main__.py
+from .runner import run_benchmark
+
+if __name__ == "__main__":
+    run_benchmark()
+
+
+
+================================================
+File: benchmark/benchmark_config.yaml
+================================================
+benchmarks:
+  - model: openrouter/auto
+    attempts: 3
+
+
+
+
+================================================
+File: benchmark/providers.py
+================================================
+import os
+import logging
+from typing import List, Dict, Any, Optional, Tuple
+from dotenv import load_dotenv
+from openai import OpenAI
+
+def load_env():
+    dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
+    load_dotenv(dotenv_path=dotenv_path)
+
+load_env()
+
+def chat(
+    messages: List[Dict[str, Any]], model: str
+) -> Tuple[str, Optional[str]]:
+    logging.debug("calling model=%s", model)
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set OPENROUTER_API_KEY.")
+    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+    response = client.chat.completions.create(model=model, messages=messages)
+    return response.choices[0].message.content, None
+
+
+================================================
+File: benchmark/runner.py
+================================================
+"""
+Run with python -m benchmark.runner
+"""
+
+import json
+import re
+import yaml
+import os
+import sys
+import time
+import argparse
+import pathlib
+import random
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict
+
+from .providers import chat
+from core.puzzle import Puzzle, parse_simple_move
+
+LOG_DIR = Path("benchmark/logs")
+LOG_DIR.mkdir(exist_ok=True)
+CONFIG_FILE = "benchmark/benchmark_config.yaml"
+
+def now_timestamp():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def _random_shuffle_count(size: int) -> int:
+    min_moves = size
+    max_moves = size * size * 2
+    return random.randint(min_moves, max_moves)
+
+def generate_shuffle_sequence(size, moves=None):
+    moves = moves if moves is not None else _random_shuffle_count(size)
+    seq = []
+    for _ in range(moves):
+        move_type = random.choice(["row", "column"])
+        idx = random.randint(1, size)
+        direction = random.choice(["left", "right"]) if move_type == "row" else random.choice(["up", "down"])
+        seq.append({"type": move_type, "index": idx, "direction": direction})
+    return seq
+
+def get_shuffle_sequence(size: int) -> List[Dict]:
+    return generate_shuffle_sequence(size)
+
+def sanitize_model_name(model):
+    model_str = str(model) if model is not None else "default"
+    return model_str.replace("/", "_").replace(" ", "_").replace(":", "_")
+
+
+def ensure_directory(path):
+    os.makedirs(path, exist_ok=True)
+
+
+def read_yaml_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def write_json_file(data, path):
+    ensure_directory(os.path.dirname(path))
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def read_benchmarks_config():
+    config_path = pathlib.Path(CONFIG_FILE)
+    if not config_path.exists():
+        return []
+    cfg = read_yaml_file(config_path)
+    return cfg.get("benchmarks", []) if cfg else []
+
+
+INSTRUCTIONS_TEXT = """- Output your next move or sequence of moves (e.g., `R1 L`, `C2 U`, or `R1 L; C2 U; R3 R`) inside `<move>` tags.
+- Example: `<move>R1 L; C2 U</move>`
+- Do NOT include any reasoning or explanations. Only output your move(s) in the required format.
+- You must respond with at least one move inside `<move>` tags."""
+
+
+def build_prompt(mode: str, puzzle: Puzzle, grid_size: int, move_count: int) -> str:
+    base_state_block = f"```\n{puzzle.get_state_string()}\n```"
+
+    if mode == "initial":
+        solved_board_str = "\n".join(" ".join(row) for row in puzzle.solved_board)
+        return f"""# Welcome to Rubiks Slider!
+
+**Instructions:**
+
+{INSTRUCTIONS_TEXT}
+
+**How to play:**
+
+- You can shift rows left (L) or right (R).
+  - Example: `R1 L` shifts row 1 left.
+    ```
+A B C
+D E F
+G H I
+    ```
+    becomes:
+    ```
+B C A
+D E F
+G H I
+    ```
+- You can shift columns up (U) or down (D).
+  - Example: `C2 D` shifts column 2 down.
+    ```
+A B C
+D E F
+G H I
+    ```
+    becomes:
+    ```
+A H C
+D B F
+G E I
+    ```
+- You may output multiple moves per turn, separated by semicolons (`;`).
+
+**Goal:** Return Rubiks Slider to the solved state:
+
+```
+{solved_board_str}
+```
+
+**Current State:**
+
+{base_state_block}
+
+**Moves made:** 0"""
+
+    if mode == "failed_parse":
+        return f"""## Your previous move(s) could not be parsed.
+
+Please carefully output your next move or sequence of moves using the following format:
+
+- Enclose your move(s) in <move>...</move> tags.
+- Each move should be in the form `R1 L`, `C2 U`, etc. (e.g., `R1 L; C2 U; R3 R` for multiple moves, separated by semicolons).
+- Example: `<move>R1 L; C2 U</move>`
+- Do not include any other formatting or explanations inside the <move> tags.
+
+## Current State ({grid_size}x{grid_size})
+
+{base_state_block}
+
+**Moves made:** {move_count}"""
+
+    return f"""## Current State ({grid_size}x{grid_size})
+
+{base_state_block}
+
+**Moves made:** {move_count}
+
+**Instructions:**
+
+{INSTRUCTIONS_TEXT}"""
+
+
+def invoke_model(messages, model):
+    start = time.time()
+    reply, reasoning = chat(messages, model)
+    return reply, reasoning, time.time() - start
+
+
+def parse_moves(response_text: str, grid_size: int):
+    match = re.search(r"<move>(.*?)</move>", response_text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    move_block = match.group(1).strip()
+    if not move_block:
+        return None
+    move_strs = [m.strip() for m in re.split(r"[;\n]", move_block) if m.strip()]
+    move_dicts = []
+    for simple_move_str in move_strs:
+        json_move_str, error_msg = parse_simple_move(simple_move_str, grid_size)
+        if error_msg:
+            return None
+        move_dicts.append(json.loads(json_move_str))
+    return move_dicts if move_dicts else None
+
+
+def apply_shuffle_sequence(puzzle: Puzzle, shuffle_sequence, grid_size: int):
+    for move in shuffle_sequence:
+        if 1 <= move.get("index", -1) <= grid_size:
+            puzzle.apply_move_from_json(json.dumps(move))
+
+
+def run_benchmark_scenario(grid_size, model, shuffle_sequence):
+    puzzle = Puzzle(size=grid_size, auto_shuffle=False)
+    apply_shuffle_sequence(puzzle, shuffle_sequence, grid_size)
+
+    if puzzle.is_solved():
+        return {
+            "solved": True,
+            "api_calls": 0,
+            "moves": 0,
+            "time_spent": 0.0,
+            "conversation": [],
+            "termination_reason": "Already Solved",
+        }
+
+    move_count = 0
+    api_calls = 0
+    conversation = []
+    total_time = 0.0
+    failed_parse_last = False
+
+    while not puzzle.is_solved():
+        print(f"    > Attempting call {api_calls + 1} ...")
+
+        if failed_parse_last:
+            mode = "failed_parse"
+        elif not conversation:
+            mode = "initial"
+        else:
+            mode = "followup"
+
+        prompt = build_prompt(mode, puzzle, grid_size, move_count)
+        messages = conversation + [{"role": "user", "content": prompt}]
+
+        reply, reasoning, wall_time = invoke_model(messages, model)
+        total_time += wall_time
+        api_calls += 1
+
+        conversation.append({"role": "user", "content": prompt})
+        conversation.append({"role": "assistant", "content": reply, "reasoning": reasoning})
+
+        extracted_moves = parse_moves(reply, grid_size)
+        if extracted_moves is None:
+            if not failed_parse_last:
+                failed_parse_last = True
+                continue
+            return {
+                "solved": False,
+                "api_calls": api_calls,
+                "moves": move_count,
+                "time_spent": total_time,
+                "conversation": conversation,
+                "termination_reason": "Invalid Move/Response Format",
+            }
+
+        failed_parse_last = False
+
+        for move_dict in extracted_moves:
+            success, _ = puzzle.apply_move_from_json(json.dumps(move_dict))
+            if success:
+                move_count += 1
+                if puzzle.is_solved():
+                    break
+            else:
+                return {
+                    "solved": False,
+                    "api_calls": api_calls,
+                    "moves": move_count,
+                    "time_spent": total_time,
+                    "conversation": conversation,
+                    "termination_reason": "Invalid Move Applied",
+                }
+
+    return {
+        "solved": True,
+        "api_calls": api_calls,
+        "moves": move_count,
+        "time_spent": total_time,
+        "conversation": conversation,
+        "termination_reason": "Solved",
+    }
+
+
+def save_incremental_log(model, results, timestamp, run_dir):
+    model_id = f"openrouter_{sanitize_model_name(model)}"
+    max_solved = max((r["size"] for r in results if r["solved"]), default=0)
+    log_data = {
+        "provider": "openrouter",
+        "model": model,
+        "attempts": results,
+        "timestamp": timestamp,
+        "max_solved_size": max_solved,
+    }
+    model_dir = os.path.join(run_dir, model_id)
+    write_json_file(log_data, os.path.join(model_dir, f"{model_id}_results.json"))
+    print(f"    > Incremental results saved")
+
+
+def run_benchmark():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--start-size", type=int, default=3, help="Starting grid size")
+    ap.add_argument("--shuffle-moves", type=int, default=10, help="Number of shuffle moves")
+    args = ap.parse_args()
+
+    print("--- Rubiks Slider Benchmark ---")
+
+    benchmark_configs = read_benchmarks_config()
+    if not benchmark_configs:
+        print("No benchmark configurations found. Exiting.")
+        sys.exit(1)
+
+    timestamp = now_timestamp()
+    run_dir = os.path.join(LOG_DIR, timestamp)
+    ensure_directory(run_dir)
+    print(f"[*] Log directory: {run_dir}")
+
+    models = []
+    for cfg in benchmark_configs:
+        model = cfg.get("model")
+        if model:
+            models.append(model)
+
+    if not models:
+        print("No valid models found in config. Exiting.")
+        sys.exit(1)
+
+    model_results = defaultdict(list)
+    active_models = set(models)
+    current_size = args.start_size
+
+    while active_models and current_size <= 7:
+        print(f"\n--- Grid Size: {current_size}x{current_size} ---")
+        shuffle = get_shuffle_sequence(current_size)
+        print(f"  > Using {len(shuffle)} shuffle moves")
+
+        succeeded = set()
+
+        for model in list(active_models):
+            print(f"\n  --- Testing openrouter/{model} ---")
+
+            result = run_benchmark_scenario(current_size, model, shuffle)
+            
+            run_data = {
+                "size": current_size,
+                "moves": result["moves"],
+                "solved": result["solved"],
+                "conversation": result["conversation"],
+                "time_spent": result["time_spent"],
+                "api_calls_made": result["api_calls"],
+            }
+            if not result["solved"]:
+                run_data["stop_reason"] = result["termination_reason"]
+
+            model_results[model].append(run_data)
+            save_incremental_log(model, model_results[model], timestamp, run_dir)
+
+            status = "solved" if result["solved"] else result["termination_reason"]
+            print(f"    > Result: api_calls={result['api_calls']}, moves={result['moves']}, {status}")
+
+            if result["solved"]:
+                succeeded.add(model)
+
+        if not succeeded:
+            print(f"\n--- No models succeeded at size {current_size}. Stopping. ---")
+            break
+
+        current_size += 1
+
+    print("\n--- Benchmark Complete ---")
+    for model, results in model_results.items():
+        max_solved = max((r["size"] for r in results if r["solved"]), default=0)
+        print(f"  openrouter/{model}: Max solved = {max_solved or 'None'}")
+
+
+if __name__ == "__main__":
+    run_benchmark()
+
+
+================================================
+File: benchmark/visualize.py
+================================================
+"""Render aggregate run_log for a model to a single Video (MP4/H.264).
+Usage: python -m benchmark.visualize <..._results.json> <output_directory> --fps 2
+"""
+
+import argparse
+import json
+import textwrap
+import numpy as np
+import matplotlib.pyplot as plt
+import imageio
+from pathlib import Path
+import copy
+import sys
+import tempfile
+import os
+import re 
+
+from core.puzzle import Puzzle, parse_simple_move
+from .runner import sanitize_model_name
+
+COLOR_MAP = {
+    "A": "#e6194B",  # Red
+    "B": "#4363d8",  # Blue
+    "C": "#ffe119",  # Yellow
+    "D": "#3cb44b",  # Green
+    "E": "#f58231",  # Orange
+    "F": "#911eb4",  # Purple
+    "G": "#42d4f4"   # Cyan
+}
+
+
+def draw_board(ax, grid):
+    n = len(grid)
+    ax.set_facecolor("black")
+    ax.clear()
+    for y, row in enumerate(grid):
+        for x, col_val in enumerate(row):
+            ax.add_patch(
+                plt.Rectangle(
+                    (x, n - y - 1),
+                    1,
+                    1,
+                    facecolor=COLOR_MAP.get(col_val, "#777777"),
+                    edgecolor="black",
+                    lw=0.5,
+                )
+            )
+            ax.text(
+                x + 0.5,
+                n - y - 0.5,
+                col_val,
+                ha="center",
+                va="center",
+                fontsize=32,
+                color="black",
+                weight="bold",
+                family="DejaVu Sans",
+            )
+    ax.set_xlim(0, n)
+    ax.set_ylim(0, n)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def extract_moves_from_run_data(run_data, grid_size):
+    """
+    Extracts moves and initial state from a single 'run' dictionary.
+    """
+    conversation = run_data.get("conversation", [])
+    initial_state = None
+    current_state_marker = "**Current State:**"
+
+    for turn in conversation:
+        if turn["role"] == "user":
+            content = turn["content"]
+            marker_pos = content.find(current_state_marker)
+            if marker_pos != -1:
+                search_area = content[marker_pos + len(current_state_marker) :]
+                m = re.search(
+                    r"```\s*((?:[A-Z0-9 ]+\n)+?)\s*```", search_area, re.MULTILINE
+                )
+                if m:
+                    board_str = m.group(1).strip(" \n")
+                    board_lines = [
+                        line.strip().replace(" ", "")
+                        for line in board_str.splitlines()
+                        if line.strip()
+                    ]
+                    if board_lines and all(len(line) == len(board_lines[0]) for line in board_lines):
+                        initial_state = [list(row) for row in board_lines]
+                        break
+            if initial_state:
+                break
+    
+    if not initial_state:
+        summary = run_data.get("summary", {})
+        initial_board_str = summary.get("initial_board_state_for_visualization")
+        if initial_board_str:
+             board_lines = [
+                line.strip().replace(" ", "")
+                for line in initial_board_str.splitlines()
+                if line.strip()
+            ]
+             if board_lines and all(len(line) == len(board_lines[0]) for line in board_lines):
+                initial_state = [list(row) for row in board_lines]
+
+    if not initial_state:
+        raise ValueError(
+            f"Could not extract valid initial state for grid size {grid_size} from conversation or summary for the run."
+        )
+    
+    if len(initial_state) != grid_size or not all(len(row) == grid_size for row in initial_state):
+        raise ValueError(
+            f"Extracted initial state dimensions ({len(initial_state)}x{len(initial_state[0]) if initial_state else 0}) "
+            f"do not match expected grid size {grid_size}x{grid_size}."
+        )
+
+
+    moves_extracted = []
+    puz = Puzzle(size=grid_size, auto_shuffle=False)
+    puz.board = copy.deepcopy(initial_state)
+
+    moves_extracted.append(
+        {
+            "state_before_move": copy.deepcopy(puz.board),
+            "state_after_move": copy.deepcopy(puz.board),
+            "model_move": "Initial State",
+            "model_reasoning": "Starting configuration of Rubiks Slider for this run.",
+            "move_json": None,
+        }
+    )
+
+    for turn_idx, turn in enumerate(conversation):
+        if turn["role"] != "assistant":
+            continue
+
+        content = turn.get("content", "")
+        move_match = re.search(
+            r"<move>(.*?)</move>", content, re.DOTALL | re.IGNORECASE
+        )
+        reasoning_match = re.search(
+            r"<reasoning>(.*?)</reasoning>", content, re.DOTALL | re.IGNORECASE
+        )
+
+        move_str = move_match.group(1).strip() if move_match else "No <move> tag found"
+        
+        if reasoning_match:
+            reasoning_str = reasoning_match.group(1).strip()
+        elif move_match:
+            reasoning_str = re.sub(r"(?is)<move>.*?</move>", "", content).strip()
+            if not reasoning_str:
+                reasoning_str = "No <reasoning> tag or other text found."
+        else:
+            reasoning_str = content.strip()
+            if not reasoning_str:
+                reasoning_str = "Empty assistant message."
+
+
+        state_before_this_move = copy.deepcopy(puz.board)
+        move_json_parsed = None
+
+        if move_match and move_str != "No <move> tag found":
+            move_json_parsed_str, err = parse_simple_move(move_str, grid_size)
+            if err:
+                print(f"Warning: Run's move '{move_str}' is invalid: {err}. Board state will not change for this step.")
+                puz.board = copy.deepcopy(state_before_this_move)
+            else:
+                try:
+                    success, _msg = puz.apply_move_from_json(move_json_parsed_str)
+                    if success:
+                        move_json_parsed = json.loads(move_json_parsed_str)
+                    else:
+                        print(f"Warning: Run's move '{move_str}' failed to apply: {_msg}. Board state will not change.")
+                        puz.board = copy.deepcopy(state_before_this_move)
+                except Exception as e_apply:
+                    print(f"Error applying move '{move_str}': {e_apply}. Board state will not change.")
+                    puz.board = copy.deepcopy(state_before_this_move)
+        else:
+            puz.board = copy.deepcopy(state_before_this_move)
+
+        state_after_this_move = copy.deepcopy(puz.board)
+
+        moves_extracted.append(
+            {
+                "state_before_move": state_before_this_move,
+                "state_after_move": state_after_this_move,
+                "model_move": move_str,
+                "model_reasoning": reasoning_str,
+                "move_json": move_json_parsed,
+            }
+        )
+    return moves_extracted, initial_state
+
+
+def generate_model_video(model_id: str, all_attempts_data: list, video_out_path: Path, fps: int):
+    """
+    Generates a single video for all attempts of a given model.
+    """
+    if not str(video_out_path).lower().endswith(".mp4"):
+        print("Warning: Output file does not end with .mp4. Forcing MP4/H.264 output.")
+        video_out_path = video_out_path.with_suffix(".mp4")
+
+    model_frames = []
+    
+    fig_w_inches, fig_h_inches, fig_dpi = 12, 6.5, 200
+    fig = plt.figure(figsize=(fig_w_inches, fig_h_inches), facecolor="black", dpi=fig_dpi)
+    
+    fig.suptitle(f"{model_id}", color="white", fontsize=16, weight="bold", y=0.97)
+
+    outer = fig.add_gridspec(1, 2, width_ratios=[0.35, 0.65], wspace=0.2, left=0.05, right=0.95, bottom=0.05, top=0.85)
+    ax_board = fig.add_subplot(outer[0])
+    ax_txt = fig.add_subplot(outer[1])
+
+    ax_board.set_aspect("equal", adjustable="box")
+    ax_board.set_facecolor("black")
+    ax_txt.set_facecolor("black")
+    ax_txt.axis("off")
+
+    total_attempts_for_model = len(all_attempts_data)
+
+    def _format_move_for_display(move_str: str) -> str:
+        """Converts compact move notation to human-readable format."""
+        if not move_str or move_str in ["Initial State", "No <move> tag found"]:
+            return move_str
+
+        match = re.match(r"([RC])(\d+)\s+([LRUD])", move_str, re.IGNORECASE)
+        if not match:
+            return move_str
+
+        type_char, index_str, direction_char = match.groups()
+        
+        try:
+            index = int(index_str)
+        except ValueError:
+             return f"{move_str} (Invalid Index)"
+
+        type_full = "Row" if type_char.upper() == 'R' else "Column"
+        
+        direction_map = {'L': 'Left', 'R': 'Right', 'U': 'Up', 'D': 'Down'}
+        direction_full = direction_map.get(direction_char.upper())
+
+        if not direction_full:
+             return f"{move_str} (Invalid Dir Char)"
+
+        if type_full == "Row" and direction_full not in ["Left", "Right"]:
+            return f"{move_str} (Invalid Row Dir)"
+        if type_full == "Column" and direction_full not in ["Up", "Down"]:
+             return f"{move_str} (Invalid Col Dir)"
+
+        return f"{type_full} {index} {direction_full}"
+
+    for attempt_idx, attempt_data in enumerate(all_attempts_data):
+        attempt_number_in_video = attempt_idx + 1
+        grid_size = attempt_data.get("size")
+
+        if grid_size is None:
+            print(f"Warning: Attempt {attempt_number_in_video} for model {model_id} is missing 'size'. Skipping this attempt.")
+            continue
+        
+        print(f"Processing Model '{model_id}', Attempt {attempt_number_in_video}/{total_attempts_for_model} (Size: {grid_size})")
+
+        try:
+            steps, _ = extract_moves_from_run_data(attempt_data, grid_size)
+        except ValueError as e:
+            print(f"Skipping visualization for Attempt {attempt_number_in_video} (Model: {model_id}) due to error: {e}")
+            continue
+        
+        if not steps:
+            print(f"No valid steps found for Attempt {attempt_number_in_video} (Model: {model_id}). Skipping.")
+            continue
+
+        summary = attempt_data.get("summary", {})
+        solved_status = summary.get("solved_status", attempt_data.get("solved", False))
+
+        termination_reason = summary.get("termination_reason")
+        if not termination_reason or termination_reason == "N/A":
+            termination_reason = attempt_data.get("stop_reason") or attempt_data.get("reason")
+        
+        if not termination_reason:
+            termination_reason = "N/A"
+            
+        attempt_outcome_text = "PASS" if solved_status else f"FAIL ({termination_reason})"
+
+        for step_idx, step_details in enumerate(steps):
+            ax_board.clear()
+            ax_txt.clear()
+            fig.texts.clear()
+            fig.suptitle(f"{model_id}", color="white", fontsize=16, weight="bold", y=0.97)
+
+            current_board_state = step_details["state_after_move"]
+            draw_board(ax_board, current_board_state)
+
+            fig.text(0.98, 0.02, f"Attempt {attempt_number_in_video}/{total_attempts_for_model} (Size {grid_size})", 
+                     color="grey", fontsize=9, ha="right", va="bottom", transform=fig.transFigure)
+
+            move_text = step_details["model_move"]
+            if step_idx == 0 and move_text == "Initial State":
+                move_caption = "Initial State"
+            else:
+                formatted_move = _format_move_for_display(move_text)
+                move_caption = f"Move {step_idx}: {formatted_move}"
+            
+            ax_board.text(0.5, -0.08, move_caption, transform=ax_board.transAxes,
+                          ha="center", va="top", color="lightgrey", fontsize=10, weight="bold")
+
+            ax_txt.text(0.03, 0.97, "Reasoning:", color="white", fontsize=10, weight="bold",
+                        va="top", transform=ax_txt.transAxes)
+            
+            cleaned_reasoning = step_details.get("model_reasoning", "N/A").replace(":", ":\n")
+            wrapped_reasoning = "\n" + textwrap.fill(cleaned_reasoning, width=115) 
+            reasoning_fontsize = 7 if len(cleaned_reasoning) > 500 else 8
+            ax_txt.text(0.03, 0.97 - 0.07, wrapped_reasoning, color="white", fontsize=reasoning_fontsize,
+                        va="top", linespacing=1.3, transform=ax_txt.transAxes, wrap=True)
+
+            fig.canvas.draw()
+            frame_rgba = np.asarray(fig.canvas.renderer.buffer_rgba())
+            frame_rgb = frame_rgba[:, :, :3]
+            model_frames.append(frame_rgb.copy())
+
+        summary_duration_frames = fps * 3
+        for _ in range(summary_duration_frames):
+            fig.texts.clear()
+            fig.suptitle(f"{model_id}", color="white", fontsize=16, weight="bold", y=0.97)
+            ax_txt.clear()
+            ax_txt.text(0.5, 0.5, f"Attempt {attempt_number_in_video} Result:\n{attempt_outcome_text}",
+                        color="#77DD77" if solved_status else "#FF6961",
+                        fontsize=16, weight="bold",
+                        va="center", ha="center", transform=ax_txt.transAxes, wrap=True,
+                        bbox=dict(boxstyle="round,pad=0.5", fc="black", ec="grey", lw=1))
+            
+            fig.canvas.draw()
+            frame_rgba = np.asarray(fig.canvas.renderer.buffer_rgba())
+            frame_rgb = frame_rgba[:, :, :3]
+            model_frames.append(frame_rgb.copy())
+
+    plt.close(fig)
+
+    if not model_frames:
+        print(f"No frames generated for model {model_id}. Video will not be created.")
+        return
+
+    video_out_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Writing {len(model_frames)} frames for model '{model_id}' to {video_out_path} at {fps} FPS...")
+    try:
+        imageio.mimwrite(video_out_path, model_frames, fps=fps, codec="libx264", quality=9, pixelformat="yuv420p")
+        print(f"[visualize] Successfully wrote video to {video_out_path}")
+    except Exception as e:
+        print(f"\nError writing video file for model '{model_id}': {e}")
+        print("Ensure ffmpeg is installed and accessible by imageio.")
+        print("You might need to install it via your system's package manager")
+        print("or install the Python package: pip install imageio[ffmpeg]")
+        
+def run_self_test():
+    print("Running embedded self-test for benchmark.visualize (single video per model)...")
+
+    EMBEDDED_AGGREGATE_LOG_DATA = """{
+  "provider": "embedded_test_provider",
+  "model": "test_model_log_v2",
+  "attempts": [
+    {
+      "size": 3,
+      "moves": 1,
+      "solved": true, 
+      "reason": "Solved via top-level", 
+      "conversation": [
+        {"role": "user", "content": "Initial prompt for attempt 1. **Current State:**\\n```\\nA B C\\nD E F\\nG H I\\n```\\nMake a move."},
+        {"role": "assistant", "content": "<reasoning>This is reasoning for attempt 1, move 1.</reasoning><move>R1 L</move>"}
+      ],
+      "run_errors": []
+    },
+    {
+      "size": 2,
+      "moves": 5,
+      "conversation": [
+        {"role": "user", "content": "Initial prompt for attempt 2. **Current State:**\\n```\\nX Y\\nZ W\\n```\\nMake a move."},
+        {"role": "assistant", "content": "<reasoning>This is reasoning for attempt 2, move 1.</reasoning><move>C1 U</move>"},
+        {"role": "assistant", "content": "<reasoning>This is reasoning for attempt 2, move 2. This reasoning is a bit longer to test text wrapping and see how it fits into the allocated space for the visualization panel, ensuring that it does not overflow or become unreadable due to excessive length or small font size. We need to check if the text wraps correctly and remains legible.</reasoning><move>R2 R</move>"}
+      ],
+      "summary": {
+        "solved_status": false, 
+        "termination_reason": "Max moves exceeded (from summary)"
+      },
+      "run_errors": ["Example error if any"]
+    }
+  ],
+  "timestamp": "20250101_000000",
+  "max_solved_size": 3
+}"""
+    
+    temp_log_file_path = None
+    with tempfile.TemporaryDirectory(prefix="cline_vis_test_") as tmp_output_dir_str:
+        tmp_output_dir = Path(tmp_output_dir_str)
+        
+        try:
+            with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json", encoding="utf-8", dir=tmp_output_dir) as tmp_f:
+                tmp_f.write(EMBEDDED_AGGREGATE_LOG_DATA)
+                temp_log_file_path = Path(tmp_f.name)
+            
+            process_aggregate_log(temp_log_file_path, tmp_output_dir, fps=1)
+
+            expected_video_filename = sanitize_model_name("embedded_test_provider_test_model_log_v2") + ".mp4"
+            expected_video_file = tmp_output_dir / expected_video_filename
+            
+            if not expected_video_file.exists():
+                print(f"[FAIL] Expected video file was not created: {expected_video_file}")
+                return False
+            if expected_video_file.stat().st_size == 0:
+                print(f"[FAIL] Expected video file is empty: {expected_video_file}")
+                return False
+            
+            print(f"[PASS] Embedded test: Video '{expected_video_file.name}' created in {tmp_output_dir}")
+            return True
+
+        except Exception as e:
+            print(f"[FAIL] Embedded test failed during visualization: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            if temp_log_file_path and temp_log_file_path.exists():
+                try:
+                    os.remove(temp_log_file_path)
+                except Exception as e_rem:
+                    print(f"Warning: Could not remove temporary log file {temp_log_file_path}: {e_rem}")
+
+def process_aggregate_log(aggregate_log_path: Path, output_dir_path: Path, fps: int):
+    """
+    Processes an aggregate log file, generating a single video for the model described in the log.
+    """
+    if not aggregate_log_path.exists():
+        raise FileNotFoundError(f"Aggregate log file not found at {aggregate_log_path}")
+
+    try:
+        with open(aggregate_log_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Error reading aggregate log file {aggregate_log_path}: Invalid JSON - {e}")
+
+    all_attempts_data = data.get("attempts")
+    if not all_attempts_data or not isinstance(all_attempts_data, list):
+        raise ValueError(f"Log file {aggregate_log_path.name} does not contain a valid 'attempts' array or is empty.")
+
+    provider = data.get("provider")
+    model_name_from_log = data.get("model")
+    
+    model_id_parts = []
+    if provider:
+        model_id_parts.append(provider)
+    if model_name_from_log:
+        model_id_parts.append(model_name_from_log)
+    
+    if not model_id_parts:
+        base_name = aggregate_log_path.name
+        if base_name.endswith("_results.json"):
+            model_id_from_filename = base_name[:-len("_results.json")]
+        else:
+            model_id_from_filename = base_name.rsplit('.', 1)[0] if '.' in base_name else base_name
+        model_id = sanitize_model_name(model_id_from_filename)
+        print(f"Warning: Could not find provider/model in JSON, using filename-derived ID: {model_id}")
+    else:
+        model_id = sanitize_model_name("_".join(model_id_parts))
+
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    video_filename = f"{model_id}.mp4"
+    video_out_path = output_dir_path / video_filename
+    
+    print(f"\nProcessing all attempts for Model '{model_id}' from {aggregate_log_path.name} -> {video_out_path}")
+    try:
+        generate_model_video(model_id, all_attempts_data, video_out_path, fps)
+    except Exception as e:
+        print(f"Error generating video for Model '{model_id}': {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def main():
+    if len(sys.argv) == 1:
+        print("No arguments provided. Running embedded self-test...")
+        result = run_self_test()
+        sys.exit(0 if result else 1)
+
+    ap = argparse.ArgumentParser(
+        description="Render Rubiks Slider aggregate log to a single MP4 video for the model."
+    )
+    ap.add_argument("log", help="Path to the input aggregate log file (e.g., model_id_results.json)")
+    ap.add_argument("out_dir", help="Path to the output directory for the video file.")
+    ap.add_argument("--fps", type=int, default=2, help="Frames per second for the output video.")
+    args = ap.parse_args()
+
+    try:
+        process_aggregate_log(Path(args.log), Path(args.out_dir), args.fps)
+    except Exception as e:
+        print(f"[ERROR] Top-level error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+================================================
+File: core/__init__.py
+================================================
+
+
+
+
+================================================
+File: core/puzzle.py
+================================================
+import random
+import json
+import copy
+import re
+from collections import deque
+from typing import List, Dict, Any, Optional
+
+class Puzzle:
+    """Rubiks Slider with row/column shifts."""
+
+    def __init__(
+        self,
+        size: int = 6,
+        auto_shuffle: bool = True,
+        shuffle_moves: Optional[int] = None,
+        target_board: Optional[List[List[str]]] = None,
+    ):
+        if size < 2:
+            raise ValueError("Grid size must be at least 2.")
+        self.size = size
+
+        if target_board:
+            if not isinstance(target_board, list) or len(target_board) != size:
+                raise ValueError(f"Invalid target_board: Must be a list of {size} rows.")
+            for r_idx, row in enumerate(target_board):
+                if not isinstance(row, list) or len(row) != size:
+                    raise ValueError(
+                        f"Invalid target_board: Row {r_idx+1} must be a list of {size} elements."
+                    )
+            self.solved_board = copy.deepcopy(target_board)
+        else:
+            self.solved_board = self._create_solved_board()
+
+        self.board = copy.deepcopy(self.solved_board)
+        self.shuffle_sequence: List[Dict[str, Any]] = []
+
+        if auto_shuffle:
+            moves_to_apply = shuffle_moves if shuffle_moves is not None else random.randint(self.size, self.size * self.size * 2)
+            self._shuffle_board(moves_to_apply)
+
+    def _create_solved_board(self) -> List[List[str]]:
+        start_char_code = ord("A")
+        return [[chr(start_char_code + r)] * self.size for r in range(self.size)]
+
+    def _shuffle_board(self, moves: int = 10):
+        self.shuffle_sequence = []
+        for _ in range(moves):
+            move_type = random.choice(["row", "column"])
+            internal_index = random.randint(0, self.size - 1)
+            direction = (
+                random.choice(["left", "right"])
+                if move_type == "row"
+                else random.choice(["up", "down"])
+            )
+            move_dict = {
+                "type": move_type,
+                "index": internal_index + 1,
+                "direction": direction,
+            }
+            self.shuffle_sequence.append(move_dict)
+            self._apply_move_internal(move_type, internal_index, direction)
+        if self.is_solved():
+            self._shuffle_board(moves + 5)
+
+    def get_shuffle_key(self) -> List[Dict[str, Any]]:
+        return copy.deepcopy(self.shuffle_sequence)
+
+    @staticmethod
+    def _reverse_move(move: Dict[str, Any]) -> Dict[str, Any]:
+        inverted_move = copy.deepcopy(move)
+        direction = inverted_move["direction"]
+        opposites = {"left": "right", "right": "left", "up": "down", "down": "up"}
+        inverted_move["direction"] = opposites[direction]
+        return inverted_move
+
+    @staticmethod
+    def reverse_sequence(sequence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [Puzzle._reverse_move(move) for move in reversed(sequence)]
+
+    def display_board(self):
+        for row in self.board:
+            print(" ".join(row))
+
+    def _shift_row(self, row_index: int, direction: str):
+        row_deque = deque(self.board[row_index])
+        row_deque.rotate(-1 if direction == "left" else 1)
+        self.board[row_index] = list(row_deque)
+
+    def _shift_column(self, col_index: int, direction: str):
+        column_deque = deque(self.board[r][col_index] for r in range(self.size))
+        column_deque.rotate(-1 if direction == "up" else 1)
+        for r in range(self.size):
+            self.board[r][col_index] = column_deque[r]
+
+    def _apply_move_internal(self, move_type: str, index: int, direction: str):
+        if move_type == "row":
+            self._shift_row(index, direction)
+        else:
+            self._shift_column(index, direction)
+
+    def apply_move_from_json(self, json_string: str):
+        try:
+            move_data = json.loads(json_string)
+        except json.JSONDecodeError:
+            return False, "Invalid JSON format."
+
+        required_keys = {"type", "index", "direction"}
+        if not required_keys.issubset(move_data.keys()):
+            return False, f"Missing required keys. Need: {required_keys}"
+
+        move_type = move_data.get("type")
+        direction = move_data.get("direction")
+        index = move_data.get("index")
+        if not isinstance(index, int) or not (1 <= index <= self.size):
+            return (
+                False,
+                f"Invalid index. Must be an integer between 1 and {self.size}.",
+            )
+        internal_index = index - 1
+
+        if move_type == "row" and direction in ["left", "right"]:
+            self._apply_move_internal(move_type, internal_index, direction)
+            return True, f"Moved row {index} {direction}."
+        elif move_type == "column" and direction in ["up", "down"]:
+            self._apply_move_internal(move_type, internal_index, direction)
+            return True, f"Moved column {index} {direction}."
+        else:
+            return False, "Invalid move type or direction."
+
+    def is_solved(self) -> bool:
+        return self.board == self.solved_board
+
+    def get_state_string(self) -> str:
+        return "\n".join(" ".join(row) for row in self.board)
+
+def parse_simple_move(input_str: str, grid_size: int):
+    input_str = input_str.strip().upper()
+    match = re.match(r"^(R|C)(\d+)\s+(L|R|U|D)$", input_str)
+    if not match:
+        return None, "Invalid format. Use 'R# L/R' or 'C# U/D' (e.g., R1 L, C2 U)."
+
+    type_char, index_str, direction_char = match.groups()
+    index = int(index_str)
+    if not (1 <= index <= grid_size):
+        return None, f"Index {index} out of bounds (must be 1-{grid_size})."
+
+    move_type = "row" if type_char == "R" else "column"
+    direction_map = {"L": "left", "R": "right", "U": "up", "D": "down"}
+    direction = direction_map.get(direction_char)
+    if (type_char == "R" and direction_char not in ["L", "R"]) or (
+        type_char == "C" and direction_char not in ["U", "D"]
+    ):
+        return None, f"Invalid direction for {move_type} move."
+
+    move_dict = {"type": move_type, "index": index, "direction": direction}
+    return json.dumps(move_dict), None
+
+
+
+
+================================================
+File: trash/problems.md
+================================================
+## Fundamental Flaws
+
+### 1. The "Reverse Shuffle = Solution" Problem - fixed
+
+### 2. Trivial Memorization Risk - Fixed
+
+### 3. Move Limit Scaling is Arbitrary - fixed
+
+### 4. No Partial Credit or Progress Metrics
+
+### 5. Single-Turn Move Parsing is Fragile
+
+**Location:** [`parse_moves()`](benchmark/runner.py:183)
+
+**Issue:** The function only looks for `<move>` tags. If a model reasons correctly but formats output slightly differently, it fails. The retry mechanism (one chance on parse failure) is minimal.
+
+### 6. Temperature = 1.0 Everywhere - fixed
+
+### 7. No Baseline Comparison
+
+### 8. State Representation May Be Suboptimal
+
+**Issue:** The board is shown as a simple grid:
+```
+A B C
+D E F
+G H I
+```
+
+This doesn't highlight:
+- Which rows/columns are "correct"
+- Distance from solved state
+- What changed from the previous state
+
+
+================================================
+File: trash/tasks.md
+================================================
+1. Fix to number 8 from `problems.md`
+    - rewrite the aaa, bbb, ccc to 123, 456, 789 etc.
+    - add grid positions to the board. R1 R2 R3, C1, C2, C3 etc so that you can understand the position of the tile.
+2. fix to number 4 from `problems.md`
+    - grade the model on not only solve/not solved but ask it where a random tile will be after it's moved are applied. 
+    - Write this new challenge into the code and add this to the prompt as a well.
+3. Update the UI in `ui`
+    - remove visual feedback so that humans can't see the result of the moves until after they've been applied.
+    - add a input field for the "Where will {{tile}} be after your move is applied?"
+    - single move and multi move mode for both UI and Benchmark. 
+        - Note: Its easy to see the result of a single move because you immediately see the result of the move. Multi move is the challenge.
+4. No move limits, the model fails when it incorrectly predicts the position of a tile after it's moved are applied (3 times)
+    - this means that that model is unable to see the consequences of its actions.
+
+
+================================================
+File: ui/index.html
+================================================
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Rubik's Slider</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231f2833'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='18' fill='%2366fcf1' font-family='Arial'%3ERS%3C/text%3E%3C/svg%3E" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        --bg: #0b0c10;
+        --panel: #1f2833;
+        --text: #c5c6c7;
+        --accent: #66fcf1;
+        --muted: #9aa0a6;
+        --tile-gap: 4px;
+        --anim-ms: 200ms;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 16px 12px 24px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif, Apple Color Emoji, Segoe UI Emoji;
+        display: flex;
+        justify-content: center;
+      }
+      .wrap {
+        width: min(96vw, 980px);
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+      .meta {
+        display: none;
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      button, .btn {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid #2f3945;
+        padding: 8px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+        user-select: none;
+      }
+      button:hover, .btn:hover { background: #243140; border-color: #3a4756; }
+      button:active, .btn:active { background: #1d2733; }
+      button[disabled] { opacity: 0.5; cursor: default; }
+
+      .counter {
+        margin-left: auto;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .board-wrap {
+        position: relative;
+        margin: 12px 0;
+        background: #0e1116;
+        border: 1px solid #2b3440;
+        border-radius: 12px;
+        padding: 10px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+      .board {
+        position: relative;
+        margin: 0 auto;
+        width: min(80vw, 560px);
+        aspect-ratio: 1 / 1;
+        border-radius: 10px;
+        background: #11151c;
+        overflow: hidden;
+        touch-action: none; /* allow custom drag */
+        user-select: none;
+      }
+      .tile {
+        position: absolute;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        color: #111;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+        text-shadow: 0 1px 0 rgba(255,255,255,0.25);
+        box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15);
+        will-change: left, top, transform;
+        transition: left var(--anim-ms) ease, top var(--anim-ms) ease;
+      }
+      .hud {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 13px;
+        padding: 0 2px;
+      }
+      .tags {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .tag {
+        background: #18202a;
+        border: 1px solid #2b3440;
+        color: var(--text);
+        padding: 2px 6px;
+        border-radius: 999px;
+        font-size: 11px;
+      }
+      .mini {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+      }
+      #mini {
+        width: 72px;
+        height: 72px;
+        image-rendering: pixelated;
+        border-radius: 6px;
+        border: 1px solid #2b3440;
+        background: #0b0f15;
+      }
+
+      .overlay {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,0.35);
+        backdrop-filter: blur(2px);
+        z-index: 5;
+      }
+      .overlay.show { display: flex; }
+      .card {
+        background: #0c141b;
+        border: 1px solid #2b3440;
+        padding: 12px 14px;
+        border-radius: 10px;
+        color: #e5f7f6;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+        max-width: 90%;
+      }
+      .card .big {
+        color: var(--accent);
+        font-weight: 800;
+        font-size: 16px;
+        letter-spacing: 0.6px;
+        text-align: center;
+      }
+      .card .hint {
+        font-size: 12px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      a.link { color: var(--accent); text-decoration: none; }
+      a.link:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+
+
+================================================
+File: ui/package.json
+================================================
+{
+  "name": "rubiks-slider-react",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
+
+
+
+================================================
+File: ui/src/App.jsx
+================================================
+import React, { useEffect, useRef, useState } from "react";
+import Board from "./Board.jsx";
+import {
+  FIXED_LIMITS,
+  parseQuery,
+  solvedLetters,
+  buildTileBoard,
+  deepCopyBoard,
+  isSolved,
+  applyMove,
+  applySequence,
+  generateDeterministicSequence,
+  colorForLetter,
+  fromBase64Url,
+} from "./game.js";
+
+export default function App() {
+  const [size, setSize] = useState(6);
+  const [board, setBoard] = useState(() => buildTileBoard(6, solvedLetters(6)));
+  const [startBoard, setStartBoard] = useState(() => deepCopyBoard(board));
+  const [shuffleSeq, setShuffleSeq] = useState([]);
+  const [moveCount, setMoveCount] = useState(0);
+  const [limitMoves, setLimitMoves] = useState(FIXED_LIMITS[6] || 72);
+  const [progressive, setProgressive] = useState(true);
+  const [levelSizes] = useState([3, 4, 5, 6]);
+  const [levelIndex, setLevelIndex] = useState(0);
+  const [animating, setAnimating] = useState(false);
+  const [outOfMoves, setOutOfMoves] = useState(false);
+  const [solvedVisible, setSolvedVisible] = useState(false);
+  const [limitVisible, setLimitVisible] = useState(false);
+  const [solvedMessage, setSolvedMessage] = useState("Solved!");
+
+  const miniRef = useRef(null);
+
+  function updateLimitForSize(nextSize) {
+    setLimitMoves(FIXED_LIMITS[nextSize] || nextSize * nextSize * 2);
+  }
+
+  function drawMiniMap(n) {
+    const canvas = miniRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const letters = solvedLetters(n);
+    const W = canvas.width,
+      H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const gap = 1;
+    const cellW = Math.floor((W - (n + 1) * gap) / n);
+    const cellH = Math.floor((H - (n + 1) * gap) / n);
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        const x = gap + c * (cellW + gap);
+        const y = gap + r * (cellH + gap);
+        ctx.fillStyle = colorForLetter(letters[r][c]);
+        ctx.fillRect(x, y, cellW, cellH);
+      }
+    }
+  }
+
+  function performMove(move) {
+    if (animating || outOfMoves) return;
+
+    if (moveCount >= limitMoves) {
+      setLimitVisible(true);
+      setOutOfMoves(true);
+      return;
+    }
+
+    setAnimating(true);
+
+    const next = deepCopyBoard(board);
+    applyMove(next, move);
+    setBoard(next);
+    setMoveCount((c) => c + 1);
+
+    window.setTimeout(() => {
+      setAnimating(false);
+      if (isSolved(next)) {
+        if (progressive) {
+          setSolvedMessage("Level complete!");
+          setSolvedVisible(true);
+          window.setTimeout(() => advanceLevel(), 800);
+        } else {
+          setSolvedMessage("Solved!");
+          setSolvedVisible(true);
+        }
+      }
+    }, 230);
+  }
+
+  function resetPuzzle() {
+    setBoard(deepCopyBoard(startBoard));
+    setMoveCount(0);
+    setOutOfMoves(false);
+    setSolvedVisible(false);
+    setLimitVisible(false);
+  }
+
+  function newDeterministicPuzzleForSize(n) {
+    const letters = solvedLetters(n);
+    const fresh = buildTileBoard(n, letters);
+    const seq = generateDeterministicSequence(n);
+    setShuffleSeq(seq);
+
+    const applied = deepCopyBoard(fresh);
+    applySequence(applied, seq);
+
+    setStartBoard(deepCopyBoard(applied));
+    setBoard(deepCopyBoard(applied));
+    setMoveCount(0);
+    setOutOfMoves(false);
+    setSolvedVisible(false);
+    setLimitVisible(false);
+    drawMiniMap(n);
+  }
+
+  function startLevel(n) {
+    setSize(n);
+    updateLimitForSize(n);
+    setSolvedVisible(false);
+    setLimitVisible(false);
+    setOutOfMoves(false);
+
+    const letters = solvedLetters(n);
+    const base = buildTileBoard(n, letters);
+
+    const seq = generateDeterministicSequence(n);
+    setShuffleSeq(seq);
+
+    const applied = deepCopyBoard(base);
+    applySequence(applied, seq);
+
+    setStartBoard(deepCopyBoard(applied));
+    setBoard(deepCopyBoard(applied));
+    setMoveCount(0);
+    drawMiniMap(n);
+  }
+
+  function advanceLevel() {
+    if (!progressive) return;
+    if (levelIndex + 1 >= levelSizes.length) {
+      setSolvedMessage("All levels complete!");
+      setSolvedVisible(true);
+      return;
+    }
+    const nextIdx = levelIndex + 1;
+    setLevelIndex(nextIdx);
+    startLevel(levelSizes[nextIdx]);
+  }
+
+  useEffect(() => {
+    const { size: qSize, p, progressive: qProgressive } = parseQuery(window.location.search);
+    const singlePuzzle = !!p;
+
+    const useProgressive = qProgressive || !singlePuzzle;
+    setProgressive(!!useProgressive);
+
+    if (useProgressive) {
+      setLevelIndex(0);
+      startLevel(levelSizes[0]); 
+      return;
+    }
+
+    const n = qSize;
+    setSize(n);
+    updateLimitForSize(n);
+
+    const letters = solvedLetters(n);
+    const base = buildTileBoard(n, letters);
+
+    if (p) {
+      try {
+        const decoded = JSON.parse(fromBase64Url(p));
+        if (decoded && decoded.size === n && Array.isArray(decoded.seq)) {
+          const seq = decoded.seq.map((m) => ({
+            type: m.type,
+            index: parseInt(m.index, 10),
+            direction: m.direction,
+          }));
+          setShuffleSeq(seq);
+          const applied = deepCopyBoard(base);
+          applySequence(applied, seq);
+          setStartBoard(deepCopyBoard(applied));
+          setBoard(deepCopyBoard(applied));
+          setMoveCount(0);
+          setSolvedVisible(false);
+          setLimitVisible(false);
+          drawMiniMap(n);
+          return;
+        }
+      } catch {
+        // fall through to deterministic
+      }
+    }
+
+    const seq = generateDeterministicSequence(n);
+    setShuffleSeq(seq);
+    const applied = deepCopyBoard(base);
+    applySequence(applied, seq);
+    setStartBoard(deepCopyBoard(applied));
+    setBoard(deepCopyBoard(applied));
+    setMoveCount(0);
+    setSolvedVisible(false);
+    setLimitVisible(false);
+    drawMiniMap(n);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function onNew() {
+    newDeterministicPuzzleForSize(size);
+  }
+  function onSolvedReset() {
+    resetPuzzle();
+    setSolvedVisible(false);
+  }
+  function onSolvedNew() {
+    newDeterministicPuzzleForSize(size);
+    setSolvedVisible(false);
+  }
+  function onLimitRetry() {
+    resetPuzzle();
+    setLimitVisible(false);
+  }
+  function onLimitRestart() {
+    setProgressive(true);
+    setLevelIndex(0);
+    setLimitVisible(false);
+    startLevel(levelSizes[0]);
+  }
+
+  return (
+    <div className="wrap">
+      <header>
+        <h1>Rubik's Slider</h1>
+      </header>
+
+      <div className="toolbar">
+        <button title="Create a new puzzle" onClick={onNew}>New</button>
+        <div className="counter">
+          <span>{moveCount}</span>/<span>{limitMoves}</span> Moves Made
+        </div>
+      </div>
+
+      <div className="board-wrap">
+        <Board size={size} board={board} onCommitMove={performMove} />
+
+        <div className={`overlay ${solvedVisible ? "show" : ""}`} role="status" aria-live="polite">
+          <div className="card">
+            <div className="big">{solvedMessage}</div>
+            <div className="hint">Level complete.</div>
+            <div className="actions">
+              <button onClick={onSolvedReset}>Reset</button>
+              <button onClick={onSolvedNew}>New</button>
+            </div>
+          </div>
+        </div>
+
+        <div className={`overlay ${limitVisible ? "show" : ""}`} role="status" aria-live="polite">
+          <div className="card">
+            <div className="big">Out of moves</div>
+            <div className="hint">Move limit reached.</div>
+            <div className="actions">
+              <button onClick={onLimitRetry}>Retry</button>
+              <button onClick={onLimitRestart}>Restart</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="hud">
+          <div className="mini">
+            <canvas id="mini" ref={miniRef} width="96" height="96" aria-label="Solved preview"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div className="footer"></div>
+    </div>
+  );
+}
+
+
+
+================================================
+File: ui/src/Board.jsx
+================================================
+import React, { useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
+import { colorForLetter } from "./game.js";
+
+export default function Board({ size, board, onCommitMove }) {
+  const boardRef = useRef(null);
+  const [dims, setDims] = useState({ width: 0, gap: 6, cell: 0, offset: 0 });
+
+  const computeGap = () => {
+    const v = getComputedStyle(document.documentElement).getPropertyValue("--tile-gap");
+    const parsed = parseInt(v, 10);
+    return Number.isFinite(parsed) ? parsed : 6;
+  };
+
+  useLayoutEffect(() => {
+    const el = boardRef.current;
+    if (!el) return;
+    function measure() {
+      const width = el.clientWidth || 0;
+      const n = size;
+      const gap = computeGap();
+      const totalGap = gap * (n + 1);
+      const cell = n > 0 ? Math.floor((width - totalGap) / n) : 0;
+      const offset = (width - (n * cell + totalGap)) / 2;
+      setDims({ width, gap, cell, offset });
+    }
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [size]);
+
+  const tiles = useMemo(() => {
+    const arr = [];
+    const n = size;
+    const { gap, cell, offset } = dims;
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        const cellObj = board[r][c];
+        const left = Math.round(offset + gap + c * (cell + gap));
+        const top = Math.round(offset + gap + r * (cell + gap));
+        arr.push({
+          id: cellObj.id,
+          letter: cellObj.letter,
+          r,
+          c,
+          style: {
+            width: `${cell}px`,
+            height: `${cell}px`,
+            left: `${left}px`,
+            top: `${top}px`,
+            background: colorForLetter(cellObj.letter),
+          },
+        });
+      }
+    }
+    return arr;
+  }, [board, size, dims]);
+
+  const draggingRef = useRef({
+    active: false,
+    startX: 0,
+    startY: 0,
+    axis: null, // "x" or "y"
+    lockIndex: null, // 1-based
+  });
+
+  useEffect(() => {
+    const el = boardRef.current;
+    if (!el) return;
+
+    function onPointerDown(ev) {
+      const target = ev.target.closest(".tile");
+      if (!target || !el.contains(target)) return;
+
+      el.setPointerCapture(ev.pointerId);
+      const d = draggingRef.current;
+      d.active = true;
+      d.startX = ev.clientX;
+      d.startY = ev.clientY;
+      d.axis = null;
+      d.lockIndex = null;
+    }
+
+    function onPointerMove(ev) {
+      const d = draggingRef.current;
+      if (!d.active) return;
+
+      const dx = ev.clientX - d.startX;
+      const dy = ev.clientY - d.startY;
+
+      if (!d.axis) {
+        const absX = Math.abs(dx);
+        const absY = Math.abs(dy);
+        if (absX > 8 || absY > 8) {
+          d.axis = absX >= absY ? "x" : "y";
+          const at = document.elementFromPoint(d.startX, d.startY);
+          const tile = at ? at.closest(".tile") : null;
+          if (tile) {
+            const r = parseInt(tile.dataset.r, 10);
+            const c = parseInt(tile.dataset.c, 10);
+            d.lockIndex = d.axis === "x" ? r + 1 : c + 1; // 1-based
+          }
+        }
+      }
+    }
+
+    function onPointerUp(ev) {
+      const d = draggingRef.current;
+      if (!d.active) return;
+
+      try {
+        const dx = ev.clientX - d.startX;
+        const dy = ev.clientY - d.startY;
+
+        const n = size;
+        const { cell } = dims;
+        const threshold = Math.max(18, Math.round(cell * 0.25)) || 18;
+
+        if (d.axis && d.lockIndex != null) {
+          if (d.axis === "x" && Math.abs(dx) > threshold) {
+            onCommitMove?.({
+              type: "row",
+              index: d.lockIndex,
+              direction: dx < 0 ? "left" : "right",
+            });
+          } else if (d.axis === "y" && Math.abs(dy) > threshold) {
+            onCommitMove?.({
+              type: "column",
+              index: d.lockIndex,
+              direction: dy < 0 ? "up" : "down",
+            });
+          }
+        }
+      } finally {
+        d.active = false;
+        d.axis = null;
+        d.lockIndex = null;
+        el.releasePointerCapture(ev.pointerId);
+      }
+    }
+
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerUp);
+
+    return () => {
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("pointercancel", onPointerUp);
+    };
+  }, [size, dims, onCommitMove]);
+
+  return (
+    <div id="board" className="board" ref={boardRef} aria-label="Sliding puzzle board">
+      {tiles.map((t) => (
+        <div
+          key={t.id}
+          className="tile"
+          style={t.style}
+          data-id={t.id}
+          data-r={t.r}
+          data-c={t.c}
+        >
+          {t.letter}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+
+================================================
+File: ui/src/game.js
+================================================
+export const FIXED_LIMITS = { 3: 50, 4: 100, 5: 200, 6: 400 };
+
+function getVersionFromQuery(search = typeof window !== "undefined" ? window.location.search : "") {
+  const params = new URLSearchParams(search || "");
+  const v = params.get("version");
+  if (v && /^\d{12}$/.test(v)) return v;
+  return null;
+}
+export const VERSION = getVersionFromQuery() || makeVersionNow();
+
+export const PALETTE = [
+  "#e6194B", // A Red
+  "#4363d8", // B Blue
+  "#ffe119", // C Yellow
+  "#3cb44b", // D Green
+  "#f58231", // E Orange
+  "#911eb4", // F Purple
+  "#42d4f4", // G Cyan
+  "#fabed4", // H Pink
+  "#469990", // I Teal
+  "#f032e6", // J Magenta
+  "#bcf60c", // K Lime
+  "#9A6324", // L Brown
+  "#800000", // M Maroon
+  "#2E8B57", // N SeaGreen
+  "#87CEEB", // O SkyBlue
+];
+export function colorForLetter(ch) {
+  const idx = (ch.charCodeAt(0) - 65) % PALETTE.length;
+  return PALETTE[(idx + PALETTE.length) % PALETTE.length];
+}
+
+export function clampInt(n, lo, hi) {
+  if (Number.isNaN(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+}
+export function parseQuery(search = window.location.search) {
+  const params = new URLSearchParams(search);
+  return {
+    size: clampInt(parseInt(params.get("size") || "6", 10), 2, 12),
+    p: params.get("p") || null,
+    progressive:
+      params.get("progressive") === "1" || params.get("progressive") === "true",
+  };
+}
+
+export function toBase64Url(str) {
+  const b = btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return b;
+}
+export function fromBase64Url(b64url) {
+  const pad = "=".repeat((4 - (b64url.length % 4)) % 4);
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/") + pad;
+  return atob(b64);
+}
+
+export function hash32(str) {
+  let h = 5381 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h = (((h << 5) + h) ^ str.charCodeAt(i)) >>> 0;
+  }
+  return h >>> 0;
+}
+export function mulberry32(a) {
+  return function () {
+    let t = (a += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+export function rngFromSeedString(seedStr) {
+  const seed = hash32(seedStr);
+  const r = mulberry32(seed);
+  return {
+    rand: () => r(),
+    randint: (min, max) => Math.floor(r() * (max - min + 1)) + min,
+    choice: (arr) => arr[Math.floor(r() * arr.length)],
+  };
+}
+export function getDeterministicShuffleCount(size) {
+  const rng = rngFromSeedString(`ShuffleCount_v${VERSION}_${size}`);
+  const min = size;
+  const max = size * size * 2;
+  return rng.randint(min, max);
+}
+export function generateDeterministicSequence(size, moves = null, salt = "") {
+  const count = moves != null ? moves : getDeterministicShuffleCount(size);
+  const rng = rngFromSeedString(`Benchmark_v${VERSION}_${size}${salt}`);
+  const seq = [];
+  for (let i = 0; i < count; i++) {
+    const type = rng.choice(["row", "column"]);
+    const index = rng.randint(1, size);
+    const direction =
+      type === "row" ? rng.choice(["left", "right"]) : rng.choice(["up", "down"]);
+    seq.push({ type, index, direction });
+  }
+  return seq;
+}
+
+export function makeVersionNow() {
+  const d = new Date();
+  const pad = (n) => n.toString().padStart(2, "0");
+  const MM = pad(d.getMonth() + 1);
+  const DD = pad(d.getDate());
+  const YYYY = d.getFullYear();
+  const HH = pad(d.getHours());
+  const mm = pad(d.getMinutes());
+  return `${MM}${DD}${YYYY}${HH}${mm}`;
+}
+
+export function solvedLetters(size) {
+  const grid = [];
+  for (let r = 0; r < size; r++) {
+    const ch = String.fromCharCode(65 + r);
+    const row = Array.from({ length: size }, () => ch);
+    grid.push(row);
+  }
+  return grid;
+}
+export function buildTileBoard(size, lettersGrid) {
+  let id = 1;
+  const board = [];
+  for (let r = 0; r < size; r++) {
+    const row = [];
+    for (let c = 0; c < size; c++) {
+      row.push({ id: id++, letter: lettersGrid[r][c] });
+    }
+    board.push(row);
+  }
+  return board;
+}
+export function deepCopyBoard(board) {
+  return board.map((row) => row.map((cell) => ({ id: cell.id, letter: cell.letter })));
+}
+export function isSolved(board) {
+  const size = board.length;
+  for (let r = 0; r < size; r++) {
+    const expected = String.fromCharCode(65 + r);
+    for (let c = 0; c < size; c++) {
+      if (board[r][c].letter !== expected) return false;
+    }
+  }
+  return true;
+}
+
+export function applyMove(board, move) {
+  const n = board.length;
+  const idx = move.index - 1;
+  if (move.type === "row") {
+    if (move.direction === "left") {
+      const first = board[idx][0];
+      for (let c = 0; c < n - 1; c++) board[idx][c] = board[idx][c + 1];
+      board[idx][n - 1] = first;
+    } else if (move.direction === "right") {
+      const last = board[idx][n - 1];
+      for (let c = n - 1; c > 0; c--) board[idx][c] = board[idx][c - 1];
+      board[idx][0] = last;
+    }
+  } else if (move.type === "column") {
+    if (move.direction === "up") {
+      const first = board[0][idx];
+      for (let r = 0; r < n - 1; r++) board[r][idx] = board[r + 1][idx];
+      board[n - 1][idx] = first;
+    } else if (move.direction === "down") {
+      const last = board[n - 1][idx];
+      for (let r = n - 1; r > 0; r--) board[r][idx] = board[r - 1][idx];
+      board[0][idx] = last;
+    }
+  }
+}
+export function applySequence(board, seq) {
+  for (const m of seq) applyMove(board, m);
+}
+
+
+
+================================================
+File: ui/src/main.jsx
+================================================
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App.jsx";
+
+const rootEl = document.getElementById("root");
+createRoot(rootEl).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+

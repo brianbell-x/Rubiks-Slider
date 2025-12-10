@@ -25,8 +25,10 @@ export const PALETTE = [
   "#2E8B57", // N SeaGreen
   "#87CEEB", // O SkyBlue
 ];
-export function colorForLetter(ch) {
-  const idx = (ch.charCodeAt(0) - 65) % PALETTE.length;
+export function colorForTile(val) {
+  const n = parseInt(val, 10);
+  if (isNaN(n)) return "#333";
+  const idx = (n - 1) % PALETTE.length;
   return PALETTE[(idx + PALETTE.length) % PALETTE.length];
 }
 
@@ -109,36 +111,39 @@ export function makeVersionNow() {
   return `${MM}${DD}${YYYY}${HH}${mm}`;
 }
 
-export function solvedLetters(size) {
+export function solvedNumbers(size) {
   const grid = [];
+  let num = 1;
   for (let r = 0; r < size; r++) {
-    const ch = String.fromCharCode(65 + r);
-    const row = Array.from({ length: size }, () => ch);
+    const row = [];
+    for (let c = 0; c < size; c++) {
+      row.push(String(num++));
+    }
     grid.push(row);
   }
   return grid;
 }
-export function buildTileBoard(size, lettersGrid) {
+export function buildTileBoard(size, numbersGrid) {
   let id = 1;
   const board = [];
   for (let r = 0; r < size; r++) {
     const row = [];
     for (let c = 0; c < size; c++) {
-      row.push({ id: id++, letter: lettersGrid[r][c] });
+      row.push({ id: id++, val: numbersGrid[r][c] });
     }
     board.push(row);
   }
   return board;
 }
 export function deepCopyBoard(board) {
-  return board.map((row) => row.map((cell) => ({ id: cell.id, letter: cell.letter })));
+  return board.map((row) => row.map((cell) => ({ id: cell.id, val: cell.val })));
 }
 export function isSolved(board) {
   const size = board.length;
+  let num = 1;
   for (let r = 0; r < size; r++) {
-    const expected = String.fromCharCode(65 + r);
     for (let c = 0; c < size; c++) {
-      if (board[r][c].letter !== expected) return false;
+      if (board[r][c].val !== String(num++)) return false;
     }
   }
   return true;
