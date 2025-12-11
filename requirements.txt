@@ -13,3 +13,4 @@ numpy
 tqdm
 tiktoken
 backoff
+rich

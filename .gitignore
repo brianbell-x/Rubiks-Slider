@@ -6,6 +6,7 @@ __pycache__/
 .clineignore
 .DS_Store
 temp/
+.claude
 
 # Benchmark artifacts
 benchmark/logs/

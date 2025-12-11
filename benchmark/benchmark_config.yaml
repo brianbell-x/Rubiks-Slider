@@ -1,4 +1,0 @@
-benchmarks:
-  - model: openrouter/auto
-    attempts: 3
-

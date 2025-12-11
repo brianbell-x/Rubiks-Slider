@@ -17,11 +17,12 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 from .providers import chat
+from .display import BenchmarkDashboard, console
 from core.puzzle import Puzzle, parse_simple_move
 
 LOG_DIR = Path("benchmark/logs")
 LOG_DIR.mkdir(exist_ok=True)
-CONFIG_FILE = "benchmark/benchmark_config.yaml"
+CONFIG_FILE = "benchmark/config.yaml"
 
 def now_timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -67,9 +68,15 @@ def write_json_file(data, path):
 def read_benchmarks_config():
     config_path = pathlib.Path(CONFIG_FILE)
     if not config_path.exists():
-        return []
+        return {"models": [], "attempts": 1, "seed": None}
     cfg = read_yaml_file(config_path)
-    return cfg.get("benchmarks", []) if cfg else []
+    if not cfg:
+        return {"models": [], "attempts": 1, "seed": None}
+    return {
+        "models": cfg.get("models", []),
+        "attempts": cfg.get("attempts", 1),
+        "seed": cfg.get("seed")
+    }
 
 
 INSTRUCTIONS_TEXT_PHASE1 = """- Output your next move inside `<move>` tags.
@@ -219,155 +226,206 @@ def apply_shuffle_sequence(puzzle: Puzzle, shuffle_sequence, grid_size: int):
             puzzle.apply_move_from_json(json.dumps(move))
 
 
-def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int):
+def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
+                           attempt: int = 1, total_attempts: int = 1):
+    """Run a single benchmark scenario with live dashboard."""
     puzzle = Puzzle(size=grid_size, auto_shuffle=False)
     apply_shuffle_sequence(puzzle, shuffle_sequence, grid_size)
 
     if puzzle.is_solved():
         return {
             "solved": True,
-            "api_calls": 0,
+            "turns": 0,
             "moves": 0,
             "time_spent": 0.0,
             "conversation": [],
             "termination_reason": "Already Solved",
             "predictions_total": 0,
             "predictions_correct": 0,
+            "predictions_wrong": 0,
             "prediction_accuracy": 0.0
         }
 
-    move_count = 0
-    api_calls = 0
-    conversation = []
-    total_time = 0.0
-    failed_parse_last = False
-    consecutive_wrong_predictions = 0
-    predictions_total = 0
-    predictions_correct = 0
+    # Initialize dashboard
+    dashboard = BenchmarkDashboard(
+        model=model,
+        phase=phase,
+        attempt=attempt,
+        total_attempts=total_attempts
+    )
+    dashboard.grid_size = grid_size
+    dashboard.start()
 
-    while not puzzle.is_solved():
-        print(f"    > Attempting call {api_calls + 1} ...")
+    try:
+        turns = 0
+        move_count = 0
+        conversation = []
+        total_time = 0.0
+        failed_parse_last = False
+        consecutive_wrong_predictions = 0
+        predictions_total = 0
+        predictions_correct = 0
+        predictions_wrong = 0
+        prediction_tile = None
 
-        if failed_parse_last:
-            mode = "failed_parse"
-            # Keep same prediction tile for retry
-        elif not conversation:
-            mode = "initial"
-            prediction_tile = random.randint(1, grid_size * grid_size)
-        else:
-            mode = "followup"
-            prediction_tile = random.randint(1, grid_size * grid_size)
+        while not puzzle.is_solved():
+            dashboard.increment_turn()
 
-        prompt = build_prompt(mode, puzzle, grid_size, move_count, phase, prediction_tile)
-        messages = conversation + [{"role": "user", "content": prompt}]
+            # Store board state before move
+            before_board = [row[:] for row in puzzle.board]
 
-        reply, reasoning, wall_time = invoke_model(messages, model)
-        total_time += wall_time
-        api_calls += 1
+            if failed_parse_last:
+                mode = "failed_parse"
+                # Keep same prediction tile for retry
+            elif not conversation:
+                mode = "initial"
+                prediction_tile = random.randint(1, grid_size * grid_size)
+            else:
+                mode = "followup"
+                prediction_tile = random.randint(1, grid_size * grid_size)
 
-        conversation.append({"role": "user", "content": prompt})
-        conversation.append({"role": "assistant", "content": reply, "reasoning": reasoning})
+            # Update dashboard with prediction target
+            dashboard.set_prediction_target(prediction_tile)
 
-        extracted_moves = parse_moves(reply, grid_size)
-        extracted_prediction = parse_prediction(reply)
+            prompt = build_prompt(mode, puzzle, grid_size, move_count, phase, prediction_tile)
+            messages = conversation + [{"role": "user", "content": prompt}]
 
-        if extracted_moves is None:
-            if not failed_parse_last:
-                failed_parse_last = True
-                continue
-            return {
-                "solved": False,
-                "api_calls": api_calls,
-                "moves": move_count,
-                "time_spent": total_time,
-                "conversation": conversation,
-                "termination_reason": "Invalid Move/Response Format",
-                "predictions_total": predictions_total,
-                "predictions_correct": predictions_correct,
-                "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
-            }
+            dashboard.set_thinking(True)
+            reply, reasoning, wall_time = invoke_model(messages, model)
+            dashboard.set_thinking(False)
 
-        # Check if prediction is missing or invalid format (counts as wrong prediction)
-        if extracted_prediction is None:
-            consecutive_wrong_predictions += 1
-            predictions_total += 1
-            print(f"      > Prediction missing or invalid format. Consecutive wrong: {consecutive_wrong_predictions}")
-        else:
-            # Apply moves first to check prediction against new state
-            # But we need to be careful not to modify the puzzle if we are going to fail due to invalid moves
-            # So we'll use a temporary puzzle or apply/reverse. 
-            # Actually, we can just apply moves, and if they are valid, check prediction.
-            # If moves are invalid, we fail anyway.
-            
-            # Validate moves first
-            moves_valid = True
-            temp_puzzle = Puzzle(size=grid_size, auto_shuffle=False)
-            temp_puzzle.board = [row[:] for row in puzzle.board] # Deep copy board
-            
-            for move_dict in extracted_moves:
-                success, _ = temp_puzzle.apply_move_from_json(json.dumps(move_dict))
-                if not success:
-                    moves_valid = False
-                    break
-            
-            if not moves_valid:
-                 return {
+            total_time += wall_time
+            turns += 1
+
+            conversation.append({"role": "user", "content": prompt})
+            conversation.append({"role": "assistant", "content": reply, "reasoning": reasoning})
+
+            extracted_moves = parse_moves(reply, grid_size)
+            extracted_prediction = parse_prediction(reply)
+
+            if extracted_moves is None:
+                if not failed_parse_last:
+                    failed_parse_last = True
+                    continue
+                dashboard.stop()
+                return {
                     "solved": False,
-                    "api_calls": api_calls,
+                    "turns": turns,
                     "moves": move_count,
                     "time_spent": total_time,
                     "conversation": conversation,
-                    "termination_reason": "Invalid Move Applied",
+                    "termination_reason": "Invalid Move/Response Format",
                     "predictions_total": predictions_total,
                     "predictions_correct": predictions_correct,
+                    "predictions_wrong": predictions_wrong,
                     "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
                 }
 
-            # Moves are valid, check prediction on temp_puzzle (which has moves applied)
-            is_correct = temp_puzzle.validate_prediction(prediction_tile, extracted_prediction)
-            predictions_total += 1
-            
-            if is_correct:
-                consecutive_wrong_predictions = 0
-                predictions_correct += 1
-                print(f"      > Prediction Correct! ({extracted_prediction})")
-            else:
+            # Check if prediction is missing or invalid format (counts as wrong prediction)
+            if extracted_prediction is None:
                 consecutive_wrong_predictions += 1
-                print(f"      > Prediction Wrong. Predicted {extracted_prediction}, Actual {temp_puzzle.get_tile_position(prediction_tile)}. Consecutive wrong: {consecutive_wrong_predictions}")
+                predictions_total += 1
+                predictions_wrong += 1
+                dashboard.record_prediction_result(
+                    f"Where will tile {prediction_tile} be?",
+                    "(missing/invalid)",
+                    False
+                )
+            else:
+                # Validate moves first
+                moves_valid = True
+                temp_puzzle = Puzzle(size=grid_size, auto_shuffle=False)
+                temp_puzzle.board = [row[:] for row in puzzle.board]
 
-        if consecutive_wrong_predictions >= 3:
-             return {
-                "solved": False,
-                "api_calls": api_calls,
-                "moves": move_count,
-                "time_spent": total_time,
-                "conversation": conversation,
-                "termination_reason": "Unable to predict consequences",
-                "predictions_total": predictions_total,
-                "predictions_correct": predictions_correct,
-                "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
-            }
+                for move_dict in extracted_moves:
+                    success, _ = temp_puzzle.apply_move_from_json(json.dumps(move_dict))
+                    if not success:
+                        moves_valid = False
+                        break
 
-        failed_parse_last = False
+                if not moves_valid:
+                    dashboard.stop()
+                    return {
+                        "solved": False,
+                        "turns": turns,
+                        "moves": move_count,
+                        "time_spent": total_time,
+                        "conversation": conversation,
+                        "termination_reason": "Invalid Move Applied",
+                        "predictions_total": predictions_total,
+                        "predictions_correct": predictions_correct,
+                        "predictions_wrong": predictions_wrong,
+                        "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
+                    }
 
-        # Apply moves to actual puzzle
-        for move_dict in extracted_moves:
-            puzzle.apply_move_from_json(json.dumps(move_dict))
-            move_count += 1
-            if puzzle.is_solved():
-                break
-    
-    return {
-        "solved": True,
-        "api_calls": api_calls,
-        "moves": move_count,
-        "time_spent": total_time,
-        "conversation": conversation,
-        "termination_reason": "Solved",
-        "predictions_total": predictions_total,
-        "predictions_correct": predictions_correct,
-        "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
-    }
+                # Moves are valid, check prediction on temp_puzzle (which has moves applied)
+                is_correct = temp_puzzle.validate_prediction(prediction_tile, extracted_prediction)
+                predictions_total += 1
+
+                if is_correct:
+                    consecutive_wrong_predictions = 0
+                    predictions_correct += 1
+                else:
+                    consecutive_wrong_predictions += 1
+                    predictions_wrong += 1
+
+                # Update dashboard with boards and prediction result
+                after_board = [row[:] for row in temp_puzzle.board]
+                move_str = "; ".join(
+                    f"{'R' if m['type'] == 'row' else 'C'}{m['index']} {m['direction'][0].upper()}"
+                    for m in extracted_moves
+                )
+                dashboard.set_boards(before_board, after_board, move_str)
+                dashboard.record_prediction_result(
+                    f"Where will tile {prediction_tile} be?",
+                    extracted_prediction,
+                    is_correct
+                )
+
+            if consecutive_wrong_predictions >= 3:
+                dashboard.stop()
+                return {
+                    "solved": False,
+                    "turns": turns,
+                    "moves": move_count,
+                    "time_spent": total_time,
+                    "conversation": conversation,
+                    "termination_reason": "Unable to predict consequences",
+                    "predictions_total": predictions_total,
+                    "predictions_correct": predictions_correct,
+                    "predictions_wrong": predictions_wrong,
+                    "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
+                }
+
+            failed_parse_last = False
+
+            # Apply moves to actual puzzle
+            for move_dict in extracted_moves:
+                puzzle.apply_move_from_json(json.dumps(move_dict))
+                move_count += 1
+                if puzzle.is_solved():
+                    break
+
+            dashboard.add_moves(len(extracted_moves))
+
+        dashboard.stop()
+        return {
+            "solved": True,
+            "turns": turns,
+            "moves": move_count,
+            "time_spent": total_time,
+            "conversation": conversation,
+            "termination_reason": "Solved",
+            "predictions_total": predictions_total,
+            "predictions_correct": predictions_correct,
+            "predictions_wrong": predictions_wrong,
+            "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
+        }
+
+    finally:
+        # Ensure dashboard is stopped even on exceptions
+        if dashboard.live:
+            dashboard.stop()
 
 
 def save_incremental_log(model, results, timestamp, run_dir):
@@ -391,44 +449,52 @@ def run_benchmark():
     ap.add_argument("--shuffle-moves", type=int, default=10, help="Number of shuffle moves")
     args = ap.parse_args()
 
-    print("--- Rubiks Slider Benchmark v2 (Prediction Based) ---")
+    console.print("[bold blue]--- Rubiks Slider Benchmark v2 (Prediction Based) ---[/]")
 
-    benchmark_configs = read_benchmarks_config()
-    if not benchmark_configs:
-        print("No benchmark configurations found. Exiting.")
+    config = read_benchmarks_config()
+    models = config["models"]
+    attempts = config["attempts"]
+    seed = config["seed"]
+
+    if not models:
+        console.print("[red]No models found in config. Exiting.[/]")
         sys.exit(1)
+
+    # Seed the random generator if configured
+    if seed is not None:
+        random.seed(seed)
+        console.print(f"[dim][*] Using seed: {seed} (all models will get the same shuffles)[/]")
 
     timestamp = now_timestamp()
     run_dir = os.path.join(LOG_DIR, timestamp)
     ensure_directory(run_dir)
-    print(f"[*] Log directory: {run_dir}")
+    console.print(f"[dim][*] Log directory: {run_dir}[/]")
 
-    models = []
-    for cfg in benchmark_configs:
-        model = cfg.get("model")
-        if model:
-            models.append(model)
-
-    if not models:
-        print("No valid models found in config. Exiting.")
-        sys.exit(1)
+    model_configs = [{"model": model, "attempts": attempts} for model in models]
 
     model_results = defaultdict(list)
-    
+
     # Fixed grid size for this benchmark
     grid_size = 3
-    
-    print(f"\n--- Grid Size: {grid_size}x{grid_size} ---")
-    shuffle = get_shuffle_sequence(grid_size)
-    print(f"  > Using {len(shuffle)} shuffle moves")
 
-    for model in models:
-        print(f"\n  --- Testing openrouter/{model} ---")
-        
+    # Pre-generate all shuffle sequences so all models get the same boards
+    console.print(f"\n[bold]--- Generating shuffle sequences ---[/]")
+    shuffle_p1 = get_shuffle_sequence(grid_size)
+    shuffle_p2_3x3 = get_shuffle_sequence(grid_size)
+    shuffle_p2_4x4 = get_shuffle_sequence(4)
+    console.print(f"  [dim]> Phase 1 (3x3): {len(shuffle_p1)} moves[/]")
+    console.print(f"  [dim]> Phase 2 (3x3): {len(shuffle_p2_3x3)} moves[/]")
+    console.print(f"  [dim]> Phase 2 (4x4): {len(shuffle_p2_4x4)} moves[/]")
+
+    for model_cfg in model_configs:
+        model = model_cfg["model"]
+        total_attempts = model_cfg["attempts"]
+        console.print(f"\n  [bold cyan]--- Testing openrouter/{model} ---[/]")
+
         # Phase 1: Qualifying Round
-        print("  > Starting Phase 1 (Qualifying Round)...")
-        result_p1 = run_benchmark_scenario(grid_size, model, shuffle, phase=1)
-        
+        console.print("  [yellow]> Starting Phase 1 (Qualifying Round)...[/]")
+        result_p1 = run_benchmark_scenario(grid_size, model, shuffle_p1, phase=1, attempt=1, total_attempts=total_attempts)
+
         run_data = {
             "phase": 1,
             "size": grid_size,
@@ -436,33 +502,27 @@ def run_benchmark():
             "solved": result_p1["solved"],
             "conversation": result_p1["conversation"],
             "time_spent": result_p1["time_spent"],
-            "api_calls_made": result_p1["api_calls"],
+            "turns": result_p1["turns"],
             "predictions_total": result_p1["predictions_total"],
             "predictions_correct": result_p1["predictions_correct"],
+            "predictions_wrong": result_p1["predictions_wrong"],
             "prediction_accuracy": result_p1["prediction_accuracy"],
             "termination_reason": result_p1["termination_reason"]
         }
         model_results[model].append(run_data)
         save_incremental_log(model, model_results[model], timestamp, run_dir)
-        
-        status_p1 = "PASSED" if result_p1["solved"] else f"FAILED ({result_p1['termination_reason']})"
-        print(f"    > Phase 1 Result: {status_p1}")
-        print(f"      Stats: api_calls={result_p1['api_calls']}, moves={result_p1['moves']}, accuracy={result_p1['prediction_accuracy']:.1f}%")
+
+        if result_p1["solved"]:
+            console.print(f"    [bold green]> Phase 1 Result: PASSED[/]")
+        else:
+            console.print(f"    [bold red]> Phase 1 Result: FAILED ({result_p1['termination_reason']})[/]")
+        console.print(f"      [dim]Stats: turns={result_p1['turns']}, moves={result_p1['moves']}, accuracy={result_p1['prediction_accuracy']:.1f}%[/]")
 
         if result_p1["solved"]:
             # Phase 2: Full Benchmark
-            print("  > Starting Phase 2 (Full Benchmark)...")
-            # Use same shuffle for consistency or new one? 
-            # Usually benchmarks might use same problem or harder. 
-            # Task says "Phase 2 (Full Benchmark)... Purpose: Test compound action reasoning"
-            # Implies we should probably use the same starting state but allow multi-moves.
-            # Or maybe a fresh shuffle to avoid memory? 
-            # Let's use the same shuffle to see if they can solve it faster/better with multi-moves, 
-            # OR a new shuffle to test generalizability. 
-            # Given "Pass Criteria: Solve puzzle", let's use a fresh shuffle to ensure it's a robust test.
-            shuffle_p2 = get_shuffle_sequence(grid_size)
-            result_p2 = run_benchmark_scenario(grid_size, model, shuffle_p2, phase=2)
-            
+            console.print("  [yellow]> Starting Phase 2 (Full Benchmark)...[/]")
+            result_p2 = run_benchmark_scenario(grid_size, model, shuffle_p2_3x3, phase=2, attempt=1, total_attempts=total_attempts)
+
             run_data_p2 = {
                 "phase": 2,
                 "size": grid_size,
@@ -470,26 +530,64 @@ def run_benchmark():
                 "solved": result_p2["solved"],
                 "conversation": result_p2["conversation"],
                 "time_spent": result_p2["time_spent"],
-                "api_calls_made": result_p2["api_calls"],
+                "turns": result_p2["turns"],
                 "predictions_total": result_p2["predictions_total"],
                 "predictions_correct": result_p2["predictions_correct"],
+                "predictions_wrong": result_p2["predictions_wrong"],
                 "prediction_accuracy": result_p2["prediction_accuracy"],
                 "termination_reason": result_p2["termination_reason"]
             }
             model_results[model].append(run_data_p2)
             save_incremental_log(model, model_results[model], timestamp, run_dir)
-            
-            status_p2 = "PASSED" if result_p2["solved"] else f"FAILED ({result_p2['termination_reason']})"
-            print(f"    > Phase 2 Result: {status_p2}")
-            print(f"      Stats: api_calls={result_p2['api_calls']}, moves={result_p2['moves']}, accuracy={result_p2['prediction_accuracy']:.1f}%")
-        else:
-            print("    > Skipping Phase 2 (Phase 1 Failed)")
 
-    print("\n--- Benchmark Complete ---")
+            if result_p2["solved"]:
+                console.print(f"    [bold green]> Phase 2 (3x3) Result: PASSED[/]")
+            else:
+                console.print(f"    [bold red]> Phase 2 (3x3) Result: FAILED ({result_p2['termination_reason']})[/]")
+            console.print(f"      [dim]Stats: turns={result_p2['turns']}, moves={result_p2['moves']}, accuracy={result_p2['prediction_accuracy']:.1f}%[/]")
+
+            if result_p2["solved"]:
+                # Phase 2 (4x4): Extended Benchmark
+                grid_size_4x4 = 4
+                console.print("  [yellow]> Starting Phase 2 (4x4 Extended Benchmark)...[/]")
+                result_p2_4x4 = run_benchmark_scenario(grid_size_4x4, model, shuffle_p2_4x4, phase=2, attempt=1, total_attempts=total_attempts)
+
+                run_data_p2_4x4 = {
+                    "phase": 2,
+                    "size": grid_size_4x4,
+                    "moves": result_p2_4x4["moves"],
+                    "solved": result_p2_4x4["solved"],
+                    "conversation": result_p2_4x4["conversation"],
+                    "time_spent": result_p2_4x4["time_spent"],
+                    "turns": result_p2_4x4["turns"],
+                    "predictions_total": result_p2_4x4["predictions_total"],
+                    "predictions_correct": result_p2_4x4["predictions_correct"],
+                    "predictions_wrong": result_p2_4x4["predictions_wrong"],
+                    "prediction_accuracy": result_p2_4x4["prediction_accuracy"],
+                    "termination_reason": result_p2_4x4["termination_reason"]
+                }
+                model_results[model].append(run_data_p2_4x4)
+                save_incremental_log(model, model_results[model], timestamp, run_dir)
+
+                if result_p2_4x4["solved"]:
+                    console.print(f"    [bold green]> Phase 2 (4x4) Result: PASSED[/]")
+                else:
+                    console.print(f"    [bold red]> Phase 2 (4x4) Result: FAILED ({result_p2_4x4['termination_reason']})[/]")
+                console.print(f"      [dim]Stats: turns={result_p2_4x4['turns']}, moves={result_p2_4x4['moves']}, accuracy={result_p2_4x4['prediction_accuracy']:.1f}%[/]")
+            else:
+                console.print("    [dim]> Skipping Phase 2 (4x4) (Phase 2 3x3 Failed)[/]")
+        else:
+            console.print("    [dim]> Skipping Phase 2 (Phase 1 Failed)[/]")
+
+    console.print("\n[bold blue]--- Benchmark Complete ---[/]")
     for model, results in model_results.items():
         passed_p1 = any(r["phase"] == 1 and r["solved"] for r in results)
-        passed_p2 = any(r["phase"] == 2 and r["solved"] for r in results)
-        print(f"  openrouter/{model}: Phase 1={'PASS' if passed_p1 else 'FAIL'}, Phase 2={'PASS' if passed_p2 else 'FAIL' if passed_p1 else 'N/A'}")
+        passed_p2_3x3 = any(r["phase"] == 2 and r["size"] == 3 and r["solved"] for r in results)
+        passed_p2_4x4 = any(r["phase"] == 2 and r["size"] == 4 and r["solved"] for r in results)
+        p1_status = "[green]PASS[/]" if passed_p1 else "[red]FAIL[/]"
+        p2_3x3_status = "[green]PASS[/]" if passed_p2_3x3 else ("[red]FAIL[/]" if passed_p1 else "[dim]N/A[/]")
+        p2_4x4_status = "[green]PASS[/]" if passed_p2_4x4 else ("[red]FAIL[/]" if passed_p2_3x3 else "[dim]N/A[/]")
+        console.print(f"  openrouter/{model}: Phase 1={p1_status}, Phase 2 (3x3)={p2_3x3_status}, Phase 2 (4x4)={p2_4x4_status}")
 
 
 if __name__ == "__main__":
