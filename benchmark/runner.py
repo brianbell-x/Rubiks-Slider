@@ -16,9 +16,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from .providers import chat
+from .providers import chat, UsageInfo
 from .display import BenchmarkDashboard, console
 from core.puzzle import Puzzle, parse_simple_move
+
+# #region agent log
+LOG_PATH = r"c:\dev\Rubiks-Slider-Lite\.cursor\debug.log"
+def _log_debug(session_id, run_id, hypothesis_id, location, message, data):
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"sessionId": session_id, "runId": run_id, "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data, "timestamp": time.time() * 1000}) + "\n")
+    except Exception as e:
+        pass
+# #endregion
 
 LOG_DIR = Path("benchmark/logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -79,27 +90,61 @@ def read_benchmarks_config():
     }
 
 
-INSTRUCTIONS_TEXT_PHASE1 = """- Output your next move inside `<move>` tags.
-- Example: `<move>R1 L</move>`
-- You must output exactly ONE move per turn.
-- Do NOT include any reasoning or explanations. Only output your move and prediction in the required format."""
+INSTRUCTIONS_TEXT_PHASE1 = """Your prediction must be where tile {prediction_tile} will be AFTER your move, not where it is now.
 
-INSTRUCTIONS_TEXT_PHASE2 = """- Output your next move or sequence of moves (e.g., `R1 L`, `C2 U`, or `R1 L; C2 U; R3 R`) inside `<move>` tags.
-- Example: `<move>R1 L; C2 U</move>`
-- You may output multiple moves per turn, separated by semicolons (`;`).
-- Do NOT include any reasoning or explanations. Only output your move(s) and prediction in the required format."""
+1. Decide on your next move.
+2. Simulate that move mentally and determine where tile {prediction_tile} ends up.
+3. Output your move in `<move>` tags and your prediction in `<prediction>` tags.
+
+Example: If tile 3 is at R1C2 and you move R1 L, tile 3 moves to R1C1:
+`<move>R1 L</move><prediction>R1C1</prediction>`
+
+Output exactly one move per turn. No reasoning or explanations needed."""
+
+INSTRUCTIONS_TEXT_PHASE2 = """Your prediction must be where tile {prediction_tile} will be AFTER your move(s), not where it is now.
+
+1. Decide on your next move or sequence of moves.
+2. Simulate the moves mentally and determine where tile {prediction_tile} ends up.
+3. Output your move(s) in `<move>` tags and your prediction in `<prediction>` tags.
+
+Example: `<move>R1 L; C2 U</move><prediction>R2C1</prediction>`
+
+You may output multiple moves per turn, separated by semicolons (`;`). No reasoning or explanations needed."""
 
 
 def build_prompt(mode: str, puzzle: Puzzle, grid_size: int, move_count: int, phase: int, prediction_tile: int) -> str:
     base_state_block = f"```\n{puzzle.get_labeled_state_string()}\n```"
     
-    instructions = INSTRUCTIONS_TEXT_PHASE1 if phase == 1 else INSTRUCTIONS_TEXT_PHASE2
+    # #region agent log
+    current_tile_pos = puzzle.get_tile_position(prediction_tile)
+    current_pos_str = f"R{current_tile_pos[0]}C{current_tile_pos[1]}" if current_tile_pos else None
+    board_state_str = puzzle.get_labeled_state_string()
+    _log_debug("debug-session", "run1", "A", "runner.py:109", "Prompt build - current tile position", {"prediction_tile": prediction_tile, "current_position": current_pos_str, "mode": mode, "move_count": move_count, "board_state": board_state_str})
+    # #endregion
     
-    prediction_text = f"""**Prediction Challenge:**
-After submitting your move(s), you must predict where a specific tile will end up.
-Format your prediction as: <prediction>R#C#</prediction>
+    instructions_template = INSTRUCTIONS_TEXT_PHASE1 if phase == 1 else INSTRUCTIONS_TEXT_PHASE2
+    instructions = instructions_template.format(prediction_tile=prediction_tile)
+    
+    prediction_text = f"""**Prediction Task:**
 
-For this turn: Where will tile {prediction_tile} be after your move(s)?"""
+Predict where tile {prediction_tile} will be AFTER you apply your move(s), not where it is now.
+
+Example:
+- Tile 5 is at R2C1, you move C1 U (column 1 up)
+- After C1 U: tile 5 moves from R2C1 → R1C1
+- Predict R1C1 (the position after the move)
+
+Process:
+1. Note where tile {prediction_tile} currently is
+2. Decide your move(s)
+3. Simulate the move(s) and find where tile {prediction_tile} ends up
+4. Report that new position
+
+Format: <prediction>R#C#</prediction>"""
+    
+    # #region agent log
+    _log_debug("debug-session", "run1", "C", "runner.py:110", "Prediction text wording", {"prediction_text": prediction_text, "contains_currently": "currently showing" in prediction_text, "contains_after": "After your move(s)" in prediction_text})
+    # #endregion
 
     if mode == "initial":
         solved_board_str = "\n".join(" ".join(row) for row in puzzle.solved_board)
@@ -110,33 +155,35 @@ For this turn: Where will tile {prediction_tile} be after your move(s)?"""
 - You can shift rows left (L) or right (R).
   - Example: `R1 L` shifts row 1 left.
     ```
-    C1 C2 C3
- R1  A  B  C
- R2  D  E  F
- R3  G  H  I
+       C1 C2 C3
+    R1  1  2  3
+    R2  4  5  6
+    R3  7  8  9
     ```
     becomes:
     ```
-    C1 C2 C3
- R1  B  C  A
- R2  D  E  F
- R3  G  H  I
+       C1 C2 C3
+    R1  2  3  1
+    R2  4  5  6
+    R3  7  8  9
     ```
 - You can shift columns up (U) or down (D).
   - Example: `C2 D` shifts column 2 down.
     ```
-    C1 C2 C3
- R1  A  B  C
- R2  D  E  F
- R3  G  H  I
+       C1 C2 C3
+    R1  1  2  3
+    R2  4  5  6
+    R3  7  8  9
     ```
     becomes:
     ```
-    C1 C2 C3
- R1  A  H  C
- R2  D  B  F
- R3  G  E  I
+       C1 C2 C3
+    R1  1  8  3
+    R2  4  2  6
+    R3  7  5  9
     ```
+
+**Understanding Tiles:** Each cell contains a numbered tile. In a 3x3 puzzle, tiles are numbered 1-9. When you move a row or column, the tiles in that row/column shift together.
 
 **Goal:** Return Rubiks Slider to the solved state:
 
@@ -144,17 +191,17 @@ For this turn: Where will tile {prediction_tile} be after your move(s)?"""
 {solved_board_str}
 ```
 
-**Current State:**
+**Board State (Before Your Move):**
 
 {base_state_block}
 
 **Moves made:** 0
 
+{prediction_text}
+
 **Instructions:**
 
-{instructions}
-
-{prediction_text}"""
+{instructions}"""
 
     if mode == "failed_parse":
         return f"""## Your previous response could not be parsed.
@@ -167,7 +214,7 @@ Please carefully output your next move(s) and prediction using the following for
 <move>R1 L</move>
 <prediction>R1C3</prediction>
 
-## Current State ({grid_size}x{grid_size})
+## Board State (Before Your Move) ({grid_size}x{grid_size})
 
 {base_state_block}
 
@@ -175,23 +222,23 @@ Please carefully output your next move(s) and prediction using the following for
 
 {prediction_text}"""
 
-    return f"""## Current State ({grid_size}x{grid_size})
+    return f"""**Moves made:** {move_count}
+
+{prediction_text}
+
+## Board State (Before Your Move) ({grid_size}x{grid_size})
 
 {base_state_block}
-
-**Moves made:** {move_count}
 
 **Instructions:**
 
-{instructions}
-
-{prediction_text}"""
+{instructions}"""
 
 
 def invoke_model(messages, model):
     start = time.time()
-    reply, reasoning = chat(messages, model)
-    return reply, reasoning, time.time() - start
+    reply, reasoning, usage_info = chat(messages, model)
+    return reply, reasoning, time.time() - start, usage_info
 
 
 def parse_moves(response_text: str, grid_size: int):
@@ -243,7 +290,10 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
             "predictions_total": 0,
             "predictions_correct": 0,
             "predictions_wrong": 0,
-            "prediction_accuracy": 0.0
+            "prediction_accuracy": 0.0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_cost": 0.0
         }
 
     # Initialize dashboard
@@ -267,6 +317,9 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
         predictions_correct = 0
         predictions_wrong = 0
         prediction_tile = None
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_cost = 0.0
 
         while not puzzle.is_solved():
             dashboard.increment_turn()
@@ -284,17 +337,39 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
                 mode = "followup"
                 prediction_tile = random.randint(1, grid_size * grid_size)
 
+            # #region agent log
+            current_tile_pos = puzzle.get_tile_position(prediction_tile)
+            _log_debug("debug-session", "run1", "E", "runner.py:290", "Before prompt build - current tile position", {"prediction_tile": prediction_tile, "current_position": f"R{current_tile_pos[0]}C{current_tile_pos[1]}" if current_tile_pos else None, "board_state": [row[:] for row in puzzle.board], "turn": turns + 1, "conversation_length": len(conversation)})
+            # #endregion
+
             # Update dashboard with prediction target
             dashboard.set_prediction_target(prediction_tile)
 
             prompt = build_prompt(mode, puzzle, grid_size, move_count, phase, prediction_tile)
+            # #region agent log
+            current_state_blocks_in_history = sum(1 for msg in conversation if "Current State" in msg.get("content", "") or "Board State" in msg.get("content", ""))
+            _log_debug("debug-session", "post-fix", "B", "runner.py:340", "Conversation history analysis", {"history_length": len(conversation), "current_state_blocks_count": current_state_blocks_in_history, "has_multiple_states": current_state_blocks_in_history > 1, "last_user_msg_has_state": "Board State" in (conversation[-1].get("content", "") if conversation else "")})
+            _log_debug("debug-session", "post-fix", "C", "runner.py:341", "Prompt structure check", {"prompt_contains_board_state": "Board State" in prompt, "prompt_contains_before_move": "Before Your Move" in prompt, "prompt_contains_after": "AFTER" in prompt or "after" in prompt.lower(), "prompt_contains_simulate": "SIMULATE" in prompt or "simulate" in prompt.lower(), "prompt_contains_warning": "WARNING" in prompt or "Do NOT report" in prompt, "prediction_text_first": prompt.find("PREDICTION") < prompt.find("Instructions") if "Instructions" in prompt else True, "mode": mode})
+            # #endregion
             messages = conversation + [{"role": "user", "content": prompt}]
+            
+            # #region agent log
+            _log_debug("debug-session", "post-fix", "PROMPT", "runner.py:354", "Full prompt being sent to API", {"total_messages": len(messages), "full_prompt": prompt, "conversation_history_length": len(conversation), "last_conversation_msg": conversation[-1] if conversation else None})
+            # #endregion
 
             dashboard.set_thinking(True)
-            reply, reasoning, wall_time = invoke_model(messages, model)
+            reply, reasoning, wall_time, usage_info = invoke_model(messages, model)
             dashboard.set_thinking(False)
+            
+            # #region agent log
+            _log_debug("debug-session", "post-fix", "RESPONSE", "runner.py:361", "Full API response received", {"full_reply": reply, "reasoning": reasoning, "wall_time": wall_time, "usage_info": {"prompt_tokens": usage_info.prompt_tokens, "completion_tokens": usage_info.completion_tokens, "total_tokens": usage_info.total_tokens, "cost": usage_info.cost}})
+            # #endregion
 
             total_time += wall_time
+            total_prompt_tokens += usage_info.prompt_tokens
+            total_completion_tokens += usage_info.completion_tokens
+            total_cost += usage_info.cost
+            dashboard.update_usage(total_prompt_tokens, total_completion_tokens, total_cost)
             turns += 1
 
             conversation.append({"role": "user", "content": prompt})
@@ -302,6 +377,14 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
 
             extracted_moves = parse_moves(reply, grid_size)
             extracted_prediction = parse_prediction(reply)
+
+            # #region agent log
+            current_tile_pos_before_move = puzzle.get_tile_position(prediction_tile)
+            current_pos_before_str = f"R{current_tile_pos_before_move[0]}C{current_tile_pos_before_move[1]}" if current_tile_pos_before_move else None
+            move_decided_first = extracted_moves is not None and extracted_prediction is not None
+            prediction_before_move = extracted_prediction is not None and extracted_moves is None
+            _log_debug("debug-session", "post-fix", "PARSE", "runner.py:383", "Response parsing results", {"extracted_prediction": extracted_prediction, "extracted_moves": extracted_moves, "move_decided_first": move_decided_first, "prediction_before_move": prediction_before_move, "current_tile_position_before_move": current_pos_before_str, "prediction_matches_current": extracted_prediction == current_pos_before_str})
+            # #endregion
 
             if extracted_moves is None:
                 if not failed_parse_last:
@@ -318,7 +401,10 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
                     "predictions_total": predictions_total,
                     "predictions_correct": predictions_correct,
                     "predictions_wrong": predictions_wrong,
-                    "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
+                    "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0,
+                    "total_prompt_tokens": total_prompt_tokens,
+                    "total_completion_tokens": total_completion_tokens,
+                    "total_cost": total_cost
                 }
 
             # Check if prediction is missing or invalid format (counts as wrong prediction)
@@ -355,10 +441,21 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
                         "predictions_total": predictions_total,
                         "predictions_correct": predictions_correct,
                         "predictions_wrong": predictions_wrong,
-                        "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
+                        "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0,
+                        "total_prompt_tokens": total_prompt_tokens,
+                        "total_completion_tokens": total_completion_tokens,
+                        "total_cost": total_cost
                     }
 
                 # Moves are valid, check prediction on temp_puzzle (which has moves applied)
+                # #region agent log
+                future_tile_pos = temp_puzzle.get_tile_position(prediction_tile)
+                current_tile_pos_for_validation = puzzle.get_tile_position(prediction_tile)
+                current_pos_str_for_val = f"R{current_tile_pos_for_validation[0]}C{current_tile_pos_for_validation[1]}" if current_tile_pos_for_validation else None
+                future_pos_str = f"R{future_tile_pos[0]}C{future_tile_pos[1]}" if future_tile_pos else None
+                _log_debug("debug-session", "run1", "A", "runner.py:430", "Prediction validation - all positions", {"prediction_tile": prediction_tile, "predicted_position": extracted_prediction, "current_position_before_move": current_pos_str_for_val, "actual_future_position": future_pos_str, "moves_applied": [json.dumps(m) for m in extracted_moves], "prediction_equals_current": extracted_prediction == current_pos_str_for_val, "prediction_equals_future": extracted_prediction == future_pos_str, "is_correct_prediction": extracted_prediction == future_pos_str})
+                _log_debug("debug-session", "run1", "E", "runner.py:431", "State comparison - tile movement", {"before_board": [row[:] for row in puzzle.board], "after_board": [row[:] for row in temp_puzzle.board], "tile_moved": current_pos_str_for_val != future_pos_str, "tile_current_pos": current_pos_str_for_val, "tile_future_pos": future_pos_str})
+                # #endregion
                 is_correct = temp_puzzle.validate_prediction(prediction_tile, extracted_prediction)
                 predictions_total += 1
 
@@ -394,7 +491,10 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
                     "predictions_total": predictions_total,
                     "predictions_correct": predictions_correct,
                     "predictions_wrong": predictions_wrong,
-                    "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
+                    "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0,
+                    "total_prompt_tokens": total_prompt_tokens,
+                    "total_completion_tokens": total_completion_tokens,
+                    "total_cost": total_cost
                 }
 
             failed_parse_last = False
@@ -419,7 +519,10 @@ def run_benchmark_scenario(grid_size, model, shuffle_sequence, phase: int,
             "predictions_total": predictions_total,
             "predictions_correct": predictions_correct,
             "predictions_wrong": predictions_wrong,
-            "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0
+            "prediction_accuracy": (predictions_correct / predictions_total * 100) if predictions_total > 0 else 0.0,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+            "total_cost": total_cost
         }
 
     finally:
@@ -507,7 +610,10 @@ def run_benchmark():
             "predictions_correct": result_p1["predictions_correct"],
             "predictions_wrong": result_p1["predictions_wrong"],
             "prediction_accuracy": result_p1["prediction_accuracy"],
-            "termination_reason": result_p1["termination_reason"]
+            "termination_reason": result_p1["termination_reason"],
+            "total_prompt_tokens": result_p1["total_prompt_tokens"],
+            "total_completion_tokens": result_p1["total_completion_tokens"],
+            "total_cost": result_p1["total_cost"]
         }
         model_results[model].append(run_data)
         save_incremental_log(model, model_results[model], timestamp, run_dir)
@@ -516,7 +622,9 @@ def run_benchmark():
             console.print(f"    [bold green]> Phase 1 Result: PASSED[/]")
         else:
             console.print(f"    [bold red]> Phase 1 Result: FAILED ({result_p1['termination_reason']})[/]")
+        total_tokens_p1 = result_p1['total_prompt_tokens'] + result_p1['total_completion_tokens']
         console.print(f"      [dim]Stats: turns={result_p1['turns']}, moves={result_p1['moves']}, accuracy={result_p1['prediction_accuracy']:.1f}%[/]")
+        console.print(f"      [dim]Tokens: prompt={result_p1['total_prompt_tokens']}, completion={result_p1['total_completion_tokens']}, total={total_tokens_p1}, cost=${result_p1['total_cost']:.4f}[/]")
 
         if result_p1["solved"]:
             # Phase 2: Full Benchmark
@@ -535,7 +643,10 @@ def run_benchmark():
                 "predictions_correct": result_p2["predictions_correct"],
                 "predictions_wrong": result_p2["predictions_wrong"],
                 "prediction_accuracy": result_p2["prediction_accuracy"],
-                "termination_reason": result_p2["termination_reason"]
+                "termination_reason": result_p2["termination_reason"],
+                "total_prompt_tokens": result_p2["total_prompt_tokens"],
+                "total_completion_tokens": result_p2["total_completion_tokens"],
+                "total_cost": result_p2["total_cost"]
             }
             model_results[model].append(run_data_p2)
             save_incremental_log(model, model_results[model], timestamp, run_dir)
@@ -544,7 +655,9 @@ def run_benchmark():
                 console.print(f"    [bold green]> Phase 2 (3x3) Result: PASSED[/]")
             else:
                 console.print(f"    [bold red]> Phase 2 (3x3) Result: FAILED ({result_p2['termination_reason']})[/]")
+            total_tokens_p2 = result_p2['total_prompt_tokens'] + result_p2['total_completion_tokens']
             console.print(f"      [dim]Stats: turns={result_p2['turns']}, moves={result_p2['moves']}, accuracy={result_p2['prediction_accuracy']:.1f}%[/]")
+            console.print(f"      [dim]Tokens: prompt={result_p2['total_prompt_tokens']}, completion={result_p2['total_completion_tokens']}, total={total_tokens_p2}, cost=${result_p2['total_cost']:.4f}[/]")
 
             if result_p2["solved"]:
                 # Phase 2 (4x4): Extended Benchmark
@@ -564,7 +677,10 @@ def run_benchmark():
                     "predictions_correct": result_p2_4x4["predictions_correct"],
                     "predictions_wrong": result_p2_4x4["predictions_wrong"],
                     "prediction_accuracy": result_p2_4x4["prediction_accuracy"],
-                    "termination_reason": result_p2_4x4["termination_reason"]
+                    "termination_reason": result_p2_4x4["termination_reason"],
+                    "total_prompt_tokens": result_p2_4x4["total_prompt_tokens"],
+                    "total_completion_tokens": result_p2_4x4["total_completion_tokens"],
+                    "total_cost": result_p2_4x4["total_cost"]
                 }
                 model_results[model].append(run_data_p2_4x4)
                 save_incremental_log(model, model_results[model], timestamp, run_dir)
@@ -573,7 +689,9 @@ def run_benchmark():
                     console.print(f"    [bold green]> Phase 2 (4x4) Result: PASSED[/]")
                 else:
                     console.print(f"    [bold red]> Phase 2 (4x4) Result: FAILED ({result_p2_4x4['termination_reason']})[/]")
+                total_tokens_p2_4x4 = result_p2_4x4['total_prompt_tokens'] + result_p2_4x4['total_completion_tokens']
                 console.print(f"      [dim]Stats: turns={result_p2_4x4['turns']}, moves={result_p2_4x4['moves']}, accuracy={result_p2_4x4['prediction_accuracy']:.1f}%[/]")
+                console.print(f"      [dim]Tokens: prompt={result_p2_4x4['total_prompt_tokens']}, completion={result_p2_4x4['total_completion_tokens']}, total={total_tokens_p2_4x4}, cost=${result_p2_4x4['total_cost']:.4f}[/]")
             else:
                 console.print("    [dim]> Skipping Phase 2 (4x4) (Phase 2 3x3 Failed)[/]")
         else:

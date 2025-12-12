@@ -44,11 +44,21 @@ class BenchmarkDashboard:
         self.predictions_wrong = 0
         self.streak = 0
 
+        # Usage tracking
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_cost = 0.0
+
         # Display state
         self.is_thinking = False
         self.live: Optional[Live] = None
 
-    def _render_board(self, board: List[List[str]], highlight_tile: Optional[int] = None, 
+    def _get_solved_board(self) -> List[List[str]]:
+        """Generate the solved state board."""
+        n = self.grid_size
+        return [[str(r * n + c + 1) for c in range(n)] for r in range(n)]
+
+    def _render_board(self, board: List[List[str]], highlight_tile: Optional[int] = None,
                      prev_prediction_pos: Optional[str] = None, prev_correct: Optional[bool] = None,
                      prev_tile: Optional[int] = None) -> Table:
         """Render a board as a rich Table."""
@@ -120,38 +130,42 @@ class BenchmarkDashboard:
         return Panel(header_text, title="Rubiks Slider Benchmark", border_style="blue")
 
     def _render_boards(self) -> Table:
-        """Render the before/after board comparison."""
+        """Render the before/after board comparison with solved state."""
         outer = Table(show_header=False, box=None, padding=(0, 2))
 
         # Before board
-        if self.before_board:
-            before_table = self._render_board(self.before_board)
-            outer.add_column("BEFORE", justify="center")
-        else:
-            outer.add_column("")
+        outer.add_column("BEFORE" if self.before_board else "", justify="center")
 
         # Arrow and move
         outer.add_column("", justify="center", width=20)
 
         # After board
-        if self.after_board:
-            after_table = self._render_board(
-                self.after_board,
-                prev_prediction_pos=self.prev_prediction_position,
-                prev_correct=self.prev_correct,
-                prev_tile=self.prev_prediction_tile
-            )
-            outer.add_column("AFTER", justify="center")
-        else:
-            outer.add_column("")
+        outer.add_column("AFTER" if self.after_board else "", justify="center")
+
+        # Divider
+        outer.add_column("", justify="center", width=3)
+
+        # Solved state
+        outer.add_column("SOLVED", justify="center")
 
         # Build the row
         before_content = self._render_board(self.before_board) if self.before_board else Text("(waiting)")
 
         move_text = Text()
         if self.last_move:
-            move_text.append(f"Move: {self.last_move}\n\n", style="bold yellow")
-        move_text.append("----------->", style="dim")
+            move_text.append(f"Move: {self.last_move}\n", style="bold yellow")
+        move_text.append("----------->\n", style="dim")
+
+        # Add Q&A under the arrow
+        if self.prev_question:
+            move_text.append(f"Q: {self.prev_question}\n", style="white")
+            if self.prev_answer:
+                if self.prev_correct:
+                    move_text.append(f"A: {self.prev_answer} ", style="white")
+                    move_text.append("Correct", style="bold green")
+                else:
+                    move_text.append(f"A: {self.prev_answer} ", style="white")
+                    move_text.append("Wrong", style="bold red")
 
         after_content = self._render_board(
             self.after_board,
@@ -160,26 +174,22 @@ class BenchmarkDashboard:
             prev_tile=self.prev_prediction_tile
         ) if self.after_board else Text("(waiting)")
 
-        outer.add_row(before_content, move_text, after_content)
+        divider = Text("│\n│\n│\n│", style="dim")
+
+        solved_content = self._render_board(self._get_solved_board())
+
+        outer.add_row(before_content, move_text, after_content, divider, solved_content)
 
         return outer
 
     def _render_stats_box(self) -> Panel:
-        """Render the stats box with previous turn's question and answer."""
-        if self.prev_question is None:
-            content = Text("(No previous turn)", style="dim")
-        else:
-            content = Text()
-            content.append(f"Q: {self.prev_question}\n", style="white")
-            if self.prev_answer:
-                if self.prev_correct:
-                    content.append(f"A: {self.prev_answer} ", style="white")
-                    content.append("Correct", style="bold green")
-                else:
-                    content.append(f"A: {self.prev_answer} ", style="white")
-                    content.append("Wrong", style="bold red")
-            streak_text = f"{self.streak}" if self.streak >= 0 else f"{self.streak}"
-            content.append(f"\nCorrect: {self.predictions_correct}  |  Wrong: {self.predictions_wrong}  Streak: {streak_text}", style="dim")
+        """Render the stats box with prediction stats and usage stats."""
+        content = Text()
+
+        streak_text = f"{self.streak}" if self.streak >= 0 else f"{self.streak}"
+        content.append(f"Predictions: {self.predictions_correct} correct  |  {self.predictions_wrong} wrong  |  Streak: {streak_text}\n", style="dim")
+        total_tokens = self.total_prompt_tokens + self.total_completion_tokens
+        content.append(f"Tokens: {self.total_prompt_tokens} prompt  |  {self.total_completion_tokens} completion  |  {total_tokens} total  |  Cost: ${self.total_cost:.4f}", style="dim")
 
         return Panel(content, title="Stats", border_style="dim")
 
@@ -286,4 +296,11 @@ class BenchmarkDashboard:
     def add_moves(self, count: int):
         """Add to the move counter."""
         self.moves += count
+        self.update()
+
+    def update_usage(self, prompt_tokens: int, completion_tokens: int, cost: float):
+        """Update token usage and cost stats."""
+        self.total_prompt_tokens = prompt_tokens
+        self.total_completion_tokens = completion_tokens
+        self.total_cost = cost
         self.update()
